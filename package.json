@@ -14,6 +14,6 @@
     "test": "pnpm build:packages && pnpm test:unit && pnpm --filter @leadwork/core test",
     "db:migrate": "pnpm --filter @leadwork/core migrate",
     "dev": "pnpm --filter @leadwork/web dev",
-    "worker": "pnpm --filter @leadwork/worker start"
+    "worker": "pnpm --filter @leadwork/worker build && pnpm --filter @leadwork/worker start"
   }
 }

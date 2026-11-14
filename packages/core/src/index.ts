@@ -6,3 +6,6 @@ export * from './auth.js';
 export * from './transfer.js';
 export * from './connections.js';
 export * from './planner.js';
+export * from './worker.js';
+export * from './runs.js';
+export * from './app.js';
