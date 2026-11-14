@@ -51,8 +51,8 @@ existing advisory-locked migrator; tests never reset or truncate a schema.
 3. Exact numeric filtering/sorting above JS safe-integer range, stable insertion
    ties, paginated results and stale table/view cursor rejection.
 4. Blank/duplicate CSV headers and invalid numbers; correction on the same plan;
-   exact decimal storage, CSV quoting, idempotent append and changed-request/key
-   conflicts.
+   exact decimal storage, CSV quoting, four simultaneous identical confirmations,
+   idempotent append and changed-request/key conflicts.
 5. 5000-row and 50-column service/database barriers; atomic failed confirmation at
    each capacity, unchanged committed state, then success with the same key after
    fixture-scoped capacity is released.
@@ -74,8 +74,17 @@ Worker execution and HTTP endpoints are explicitly outside this file's scope.
 
 - At source commit `4444a18`, `pnpm --filter @leadwork/core build`: exit 0.
 - Initial isolated run: 14 tests passed, 0 failed/skipped, approximately 2 seconds.
-- Concurrent/full-suite verification is recorded below after execution.
+- Final `pnpm --filter @leadwork/core build && node --test packages/core/test/*.test.mjs`:
+  exit 0, 43 tests passed, 0 failed/skipped; test duration approximately 2 seconds.
+- Two simultaneous `node --test packages/core/test/tables-transfer.test.mjs`
+  processes sharing the same Postgres database: both exit 0, each 14 tests passed,
+  0 failed/skipped, approximately 2.1 seconds per process. Both include concurrent
+  identical import and run confirmations; fixture cleanup did not interfere.
+- During strengthening, an assertion comparing `JSON.stringify` output failed
+  because Postgres JSONB reorders object keys. Corrected the **test assertion** to
+  structural `assert.deepEqual`; no service fix or weakened semantic requirement.
+  The final results above are from reruns after this correction.
 
-No service defects were observed in the initial requested regressions. If a
+No service defects were observed in the requested regressions. If a
 regression fails, preserve the failing assertion and report the exact test/error;
 do not change parent-owned service sources from this task.

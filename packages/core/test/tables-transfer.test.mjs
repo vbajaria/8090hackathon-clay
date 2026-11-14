@@ -182,7 +182,9 @@ test('CSV headers and invalid values correct the same staged plan and exact retr
   assert.equal(await count('plans',f.table.id),1);
   await assert.rejects(transfer.correct(f.owner,id,{expectedPlanRevision:'1',headers:['Name','Value']}),code('version_conflict'));
   const request = importRequest(plan);
-  const result = await transfer.confirm(f.owner,id,request);
+  const results = await Promise.all(Array.from({length:4},()=>transfer.confirm(f.owner,id,request)));
+  const result = results[0];
+  for (const retry of results) assert.deepEqual(retry,result);
   assert.deepEqual(await transfer.confirm(f.owner,id,request),result);
   await assert.rejects(transfer.confirm(f.owner,id,{...request,idempotencyKey:randomUUID()}),code('idempotency_conflict'));
   await assert.rejects(transfer.confirm(f.owner,id,{...request,expectedPlanRevision:'1'}),code('idempotency_conflict'));
@@ -244,7 +246,8 @@ test('column configuration rejects reference mismatches/cycles and deletion of r
   const output = await tables.saveColumn(f.owner,f.table.id,{name:'Dependent',definition:formula(`UPPER(${ref(source.id)})`,[source.id])});
   const saved = await persistenceState(f.table.id);
   await assert.rejects(tables.saveColumn(f.owner,f.table.id,{name:'Bad refs',definition:formula(ref(source.id),[])}),domainCode('reference_mismatch'));
-  await assert.rejects(tables.saveColumn(f.owner,f.table.id,{name:'Unknown',definition:formula(ref(randomUUID()),[])}),domainCode('reference_mismatch'));
+  const missing = randomUUID();
+  await assert.rejects(tables.saveColumn(f.owner,f.table.id,{name:'Unknown',definition:formula(ref(missing),[missing])}),domainCode('invalid_reference'));
   await assert.rejects(tables.saveColumn(f.owner,f.table.id,{expectedRevision:source.revision,definition:formula(ref(output.id),[output.id])},source.id),domainCode('dependency_cycle'));
   await assert.rejects(tables.deleteColumn(f.owner,f.table.id,source.id,source.revision),error=>{
     assert.ok(code('invalid_value')(error)); assert.deepEqual(error.extra.dependentColumnIds,[output.id]); return true;
@@ -290,7 +293,10 @@ async function reusedRun(t) {
   const preview = await runPreview(f,[output.id]);
   assert.deepEqual(preview.cells,{eligible:0,reused:2,skipped:0});
   assert.deepEqual(preview.providers,[]); assert.equal(preview.maximumExternalRequests,0);
-  const request = runRequest(preview), run = await planner.confirm(f.owner,request);
+  const request = runRequest(preview);
+  const runs = await Promise.all(Array.from({length:4},()=>planner.confirm(f.owner,request)));
+  const run = runs[0];
+  for (const retry of runs) assert.deepEqual(retry,run);
   return {...f,source,output,first,second,preview,request,run};
 }
 
@@ -309,6 +315,7 @@ test('fresh formulas are reused, run confirmation is idempotent, and SQL snapsho
   const snapshot = (await db.pool.query('SELECT * FROM app.run_rows WHERE run_id=$1 AND row_id=$2',[f.run.id,f.first.id])).rows[0];
   assert.deepEqual(snapshot.values[f.source.id],text('private first'));
   await patch(f,f.first.id,f.source.id,text('changed after confirmation'));
+  assert.deepEqual(await planner.confirm(f.owner,f.request),f.run);
   assert.deepEqual((await db.pool.query('SELECT * FROM app.run_rows WHERE run_id=$1 AND row_id=$2',[f.run.id,f.first.id])).rows[0],snapshot);
   await rollbackReject("UPDATE app.runs SET snapshot='{}'::jsonb WHERE id=$1",[f.run.id],/immutable_run/);
   await rollbackReject('UPDATE app.runs SET request_fingerprint=$2 WHERE id=$1',[f.run.id,'changed'],/immutable_run/);
