@@ -1,3 +1,10 @@
+# Final verification — supersedes historical failures below
+
+2026-11-14: all 20 cases in this suite passed in the complete root verification.
+Qualified rate-limit SQL; moved wait before poll authorization; rechecked cancellation/revocation/fences before IO; persisted request authorizations; added reactive/frozen-input freshness regressions.
+These are fixture results with zero live vendor requests. Earlier red findings
+are retained below as the debugging history, not current release status.
+
 # WO-16 execution acceptance evidence
 
 Owned scope: `packages/core/test/execution.test.mjs` and this note only. Runtime,

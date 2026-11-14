@@ -7,3 +7,6 @@ coverage/
 
 # Next regenerates framework references for dev/build mode.
 apps/web/next-env.d.ts
+
+/test-results/
+/playwright-report/

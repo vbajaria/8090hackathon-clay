@@ -1,26 +1,69 @@
 # Leadwork — Clay-style MVP
 
-Early implementation of a private lead-enrichment table product. Owners bring their own provider accounts; the product will not sell credits or send outreach.
+Private, owner-scoped lead tables with atomic CSV import, typed edits, formulas,
+filters/sort/visibility, stored-value export, encrypted provider connections,
+manual dependency-aware runs, provenance, cancellation/retry, usage accounting,
+and editable review copies. Owners bring their own accounts; no outreach is sent.
 
-## Current milestone
+The Next.js web/API and separate durable PostgreSQL worker are implemented.
+**Live provider execution is deliberately disabled.** Fixture tests are not live
+provider certification, real Supabase verification, or production deployment.
 
-WO-1 shared contracts: runtime schemas, typed values, previews/consent, fixtures, provider evidence and regression tests. **No production web application, API, worker, authentication or provider integration is implemented yet.**
+## Run locally
 
-Requirements and blueprint decisions remain pending project review. Hosting and real provider execution are gated; no cloud resources or paid requests have been created.
-
-## Local verification
-
-Requires Node 22.x and pnpm 9.15.0.
+Requires Node 22, pnpm 9.15.0, and PostgreSQL 15 on a Debian-compatible host.
+The connected Factory workspace manages database, web and worker terminals.
+See [development setup](docs/development.md) for a standalone machine.
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
+pnpm build:packages
+node scripts/workspace-setup.mjs
+# Standalone only: start PostgreSQL if setup started and stopped it.
+sudo pg_ctlcluster 15 main start
+pnpm dev       # http://localhost:3000 — explicit local development sign-in
+# Separate terminal:
+pnpm worker
 ```
 
-- [Contract handoff](docs/contracts.md)
-- [Provider evidence and release gates](docs/provider-evidence.md)
-- [Interactive local-only mockup](https://factory.8090.ai/project/addc29be-86bc-4eae-80f4-2d23939ce8d0/knowledge-base/13e8478f-acd1-4a2f-9ed9-ed84f4595165)
-- [Editable mockup source backup](https://factory.8090.ai/project/addc29be-86bc-4eae-80f4-2d23939ce8d0/knowledge-base/57bf9381-32a5-4280-9338-4bf2a697158a)
+Do not start duplicate servers in the managed Factory workspace. Development
+sign-in is loopback-only and is not a public authentication mechanism. Generated
+private environment files are ignored by git; never copy them to production.
 
-Next layers: environment/web/worker setup, database schema, feature APIs, secure connections/adapters, durable execution, client screens and end-to-end verification (WO-2 through WO-16).
+## Verify
+
+```sh
+pnpm test      # unit + real PostgreSQL fixtures; isolated leadwork_test locally
+pnpm typecheck
+pnpm build
+node --test .8090/workspace-setup.test.mjs
+# Install Chromium once; reuse the managed dev server:
+pnpm exec playwright install --with-deps chromium
+E2E_REUSE_SERVER=1 pnpm test:browser
+```
+
+Never point fixtures at production or a database with an active worker. Root
+`pnpm test` isolates local jobs; CI uses a disposable PostgreSQL service.
+
+- [Acceptance evidence and remaining release gates](docs/acceptance.md)
+- [HTTP/API handoff](docs/api-handoff.md)
+- [Provider protocol evidence](docs/provider-evidence.md)
+- [Shared contracts](docs/contracts.md)
+
+Limits: 5,000 rows, 50 columns, 10,000,000 CSV bytes and 2,000 AI-template
+characters before substitution. Empty values stay empty. Fresh outputs reuse;
+replacement preparation and overwrite consent are separate. Unknown external
+outcomes never automatically replay. Current-database restart recovery is
+supported; backup restore/reconciliation is explicitly excluded.
+
+## Review / launch
+
+PR #2 is stacked on PR #1's shared-contract branch; review/merge the foundation
+first and then retarget the full application PR appropriately. Work orders remain
+In Review, not accepted as Completed. Requirements/blueprint source edits still
+need project review.
+
+Production needs approved hosting/region/cost/retention, persistent PostgreSQL,
+real Supabase configuration and staging verification, stable encryption-key
+management, authorized provider accounts, and explicitly budgeted live evidence.
+Neither environment variables nor readiness checks bypass provider release gates.

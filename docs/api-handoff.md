@@ -18,3 +18,22 @@ HTTP API is same-origin JSON under `/api`. Success returns the JSON objects belo
 Domain functions in @leadwork/engine (independent from persistence): parseCsv(text), exportCsv(headers, typedRows), parseEditableValue(type,text), validateColumnConfiguration(columns), columnDependencies(column), topologicalColumns(columns, selectedIds), evaluateFormula(expression, valuesByColumnId), resolveInstructions(template, valuesByColumnId). Functions may throw a safe DomainError with code, not raw values. A separate @leadwork/providers package owns normalized real adapter IO; parent integrates into durable worker.
 
 Client must show setup gates, not simulate production capabilities. No localStorage as source of business data. No automatic run after edit/import. No provider calls on page load. UI recovery polling reads only.
+
+## Final integrated API notes
+
+- `RunPreviewRequest.replacePopulated` is optional, default false. Fresh selected
+  outputs reuse; populated nonfresh selected outputs skip unless replacement
+  preparation is explicitly requested. Confirmation independently checks overwrite
+  consent. Manual retries prepare replacements with latest saved inputs/settings.
+- `GET /api/runs/:id` accepts `limit` (default 50, maximum 250) and an opaque
+  server cursor. `nextCursor` covers result/provenance pages; progress totals
+  aggregate the full run, not only the page. Never locally slice a full download.
+- Existing workspace, progress and usage reads do not update owner rows or hold
+  nested database transactions. Cancellation, authorization and polling are durable.
+- Step input fingerprints include actual direct values, transitive definitions,
+  and editable source versions. JSONB object order is canonicalized. Historical
+  values stay immutable and are marked stale when current inputs differ. Legacy
+  stored results without fingerprints are conservatively stale, not certified fresh.
+- Formula recalculation rejects unavailable/stale computed inputs and performs
+  no external IO. Publication loads only the affected row and updates dependent
+  local formulas; frozen same-run values remain the downstream execution source.

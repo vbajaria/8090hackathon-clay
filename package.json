@@ -14,6 +14,10 @@
     "test": "pnpm build:packages && pnpm test:unit && node scripts/test-core.mjs",
     "db:migrate": "pnpm --filter @leadwork/core migrate",
     "dev": "pnpm --filter @leadwork/web dev",
-    "worker": "pnpm --filter @leadwork/worker build && pnpm --filter @leadwork/worker start"
+    "worker": "pnpm --filter @leadwork/worker build && pnpm --filter @leadwork/worker start",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
   }
 }

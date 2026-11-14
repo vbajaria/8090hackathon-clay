@@ -1,3 +1,10 @@
+# Final verification — supersedes historical failures below
+
+2026-11-14: all 13 cases in this suite passed in the complete root verification.
+Validated mapping container shapes; removed owner-row writes from existing-workspace reads; ended the workspace transaction before usage acquisition; verified 30 concurrent polls; bounded result pages and conservative legacy-history freshness.
+These are fixture results with zero live vendor requests. Earlier red findings
+are retained below as the debugging history, not current release status.
+
 # Fixture-only HTTP integration tests
 
 Owned files: `packages/core/test/http.test.mjs` and this note. Work branch:

@@ -37,7 +37,7 @@ value is filled; other custom environment entries remain intact.
   Supabase authentication**. `APP_ORIGIN=http://localhost:3000` is required; use
   that hostname consistently for cookies and same-origin mutation checks.
 - Development auth must not be made accessible as a public production service.
-  The Next development server listens on all interfaces for workspace previews;
+  The Next development server explicitly binds 127.0.0.1:3000;
   authenticate only via the loopback origin, not a public forwarded URL.
 
 Long-running managed terminals:
@@ -152,13 +152,11 @@ and operations ownership. Local setup is not evidence that production is ready.
 
 ## Verification status for this change
 
-Script syntax and eight non-destructive regression checks passed in the current
-workspace. Tests cover safe settings, key preservation/private files, finite waits,
-cluster lifecycle ownership and failure paths using mocked system commands. A real
-`pg_isready` probe also passed without stopping or modifying the parent database. The new
-Docker image, full workspace reload, terminal startup, health endpoint and complete
-CI require the parent implementation and a coordinated subsequent verification.
-Do not treat these unverified container/reload/deployment gates as passed.
+Eight environment regression checks passed. Two coordinated workspace reloads
+built the configured image and started PostgreSQL, the web app and the worker;
+`/api/health` returned ready with external provider execution disabled.
+Production provisioning and real-service verification remain separate gates.
+See [final acceptance evidence](acceptance.md) for the current delivery state.
 
 ## Isolated verification database
 

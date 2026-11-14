@@ -56,3 +56,7 @@ jobs:
       - run: pnpm db:migrate
       - name: Unit and real PostgreSQL core fixture tests (no vendor credentials)
         run: pnpm test
+      - name: Install Chromium for bounded browser acceptance
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Browser acceptance (development auth, zero vendors, disposable DB)
+        run: pnpm test:browser
