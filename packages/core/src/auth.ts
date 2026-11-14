@@ -77,15 +77,14 @@ function cookieJar(request:Request):Map<string,string> {
 }
 
 export function createAuth(options:AuthOptions = {}) {
-  const production = options.nodeEnv === 'production' || process.env.NODE_ENV === 'production';
-  const environment = options.nodeEnv ?? process.env.NODE_ENV;
+  const production = (options.nodeEnv ?? process.env.NODE_ENV) === 'production' || process.env.NODE_ENV === 'production';
   const url = options.supabaseUrl ?? process.env.SUPABASE_URL;
   const key = options.supabaseAnonKey ?? process.env.SUPABASE_ANON_KEY;
   const secret = options.sessionSecret ?? process.env.SESSION_SECRET;
   const appOrigin = options.appOrigin ?? process.env.APP_ORIGIN;
   const requested = options.authMode ?? process.env.AUTH_MODE;
   const devEnabled = requested === 'development' && !production &&
-    ['development', 'test'].includes(environment ?? '') && !!secret && Buffer.byteLength(secret) >= 32;
+    !!secret && Buffer.byteLength(secret) >= 32;
   const mode:Mode = requested === 'development' ? (devEnabled ? 'development' : 'unconfigured') :
     (url && key ? 'supabase' : 'unconfigured');
   const mac = (value:string) => createHmac('sha256', secret!).update(value).digest('base64url');

@@ -104,13 +104,14 @@ test('tampered, expired, malformed and caller-selected identities fail closed',a
 
 test('explicit development requires nonproduction environment and >=32-byte secret',async () => {
   for (const options of [
-    {...devOptions,nodeEnv:'production'}, {...devOptions,nodeEnv:'staging'},
+    {...devOptions,nodeEnv:'production'}, {...devOptions,sessionSecret:'x'.repeat(31)},
     {...devOptions,sessionSecret:''}, {...devOptions,sessionSecret:'short'},
   ]) {
     const auth = createAuth(options);
     assert.deepEqual(await auth.session(request()),{user:null,mode:'unconfigured'});
     await assert.rejects(signIn(auth),safeError('provider_not_ready'));
   }
+  assert.equal((await createAuth({...devOptions,nodeEnv:'nonproduction'}).session(request())).mode,'development');
   const auth = createAuth({...devOptions,authMode:'supabase',supabaseUrl:'',supabaseAnonKey:''});
   assert.equal((await auth.session(request())).mode,'unconfigured');
 });
@@ -262,4 +263,26 @@ test('Supabase logout failure cannot leak provider diagnostics',async t => {
   const login = await f.auth.login(f.post('/api/auth/login'),'owner@fixture.example');
   const callback = await f.auth.callback(f.callback(cookies(login.headers)));
   await assert.rejects(f.auth.logout(f.post('/api/auth/logout',cookies(callback.headers))),safeError('internal_error'));
+});
+
+test('production process cannot be bypassed by the nodeEnv option',async t => {
+  const previous = process.env.NODE_ENV;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous; });
+  process.env.NODE_ENV = 'production';
+  const auth = createAuth(devOptions);
+  assert.deepEqual(await auth.session(request()),{user:null,mode:'unconfigured'});
+  await assert.rejects(signIn(auth),safeError('provider_not_ready'));
+});
+
+test('secret rotation invalidates development cookies and noncanonical signatures are tampered',async () => {
+  const login = await signIn(dev());
+  const cookie = cookies(login.headers);
+  const rotated = createAuth({...devOptions,sessionSecret:secret+'-rotated'});
+  assert.equal((await rotated.session(request(undefined,{cookie}))).user,null);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  // Base64url's unused low bits are not a second spelling of a valid signature.
+  const last = alphabet.indexOf(cookie.at(-1));
+  const noncanonical = cookie.slice(0,-1)+alphabet[last | 1];
+  assert.notEqual(noncanonical,cookie);
+  assert.equal((await dev().session(request(undefined,{cookie:noncanonical}))).user,null);
 });
