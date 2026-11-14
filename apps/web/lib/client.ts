@@ -47,7 +47,7 @@ export function validateColumn(name: string, definition: unknown, columns: Colum
   if (columns.some(c => c.id !== existing?.id && c.name.trim().toLowerCase() === name.trim().toLowerCase())) throw new Error('Column names must be unique.');
   if (!existing && columns.length >= LIMITS.columns) throw new Error('A table supports at most 50 columns.');
   const parsed = ColumnDefinitionSchema.parse(definition);
-  const candidate = { id: existing?.id ?? '00000000-0000-4000-8000-000000000001', revision: existing?.revision ?? '0', name: name.trim(), definition: parsed };
+  const candidate = { id: existing?.id ?? crypto.randomUUID(), revision: existing?.revision ?? '0', name: name.trim(), definition: parsed };
   validateColumnConfiguration([...columns.filter(c => c.id !== existing?.id), candidate]);
   return parsed;
 }
