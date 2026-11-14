@@ -121,9 +121,9 @@ async function patch(f,rowId,columnId,value,expectedVersion) {
 async function column(f,name,definition) {
   return f.ok(`${f.tablePath}/columns`,{method:'POST',cookie:f.a.cookie,body:{name,definition}});
 }
-async function preview(f,columnId) {
+async function preview(f,columnId,replacePopulated=false) {
   const current = await f.data();
-  return f.ok('/runs/preview',{method:'POST',cookie:f.a.cookie,body:{tableId:f.table.id,expectedTableRevision:current.table.revision,rowScope:{kind:'all'},selectedColumnIds:[columnId]}});
+  return f.ok('/runs/preview',{method:'POST',cookie:f.a.cookie,body:{tableId:f.table.id,expectedTableRevision:current.table.revision,rowScope:{kind:'all'},selectedColumnIds:[columnId],replacePopulated}});
 }
 
 // Workers scan globally in production. Restrict only claim/recovery/expiry candidates
@@ -280,7 +280,7 @@ test('formula preview/confirm and GET progress are read-only dispatch; explicit 
   assert.equal(reused.status,'completed');
   // Live formula edits auto-compute. Mark ONLY this fixture cell stale to exercise queued work.
   await db.pool.query('UPDATE app.cells SET stale=true WHERE row_id=$1 AND column_id=$2',[row.id,formula.id]);
-  const staged = await preview(f,formula.id), request = runRequest(staged);
+  const staged = await preview(f,formula.id,true), request = runRequest(staged);
   assert.deepEqual(staged.cells,{eligible:1,reused:0,skipped:0});
   assert.equal(staged.maximumExternalRequests,0);
   error(await f.http('/runs/confirm',{method:'POST',cookie:f.b.cookie,body:request}),'not_found');

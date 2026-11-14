@@ -46,8 +46,8 @@ async function patch(f, rowId, columnId, value) {
   const data = await f.data();
   return tables.patch(f.owner, f.table.id, {rowId,columnId,expectedVersion:data.rows.find(r=>r.id===rowId).cells[columnId].version,value});
 }
-async function runPreview(f, selectedColumnIds, rowScope={kind:'all'}) {
-  return planner.preview(f.owner,{tableId:f.table.id,expectedTableRevision:(await f.data()).table.revision,rowScope,selectedColumnIds});
+async function runPreview(f, selectedColumnIds, rowScope={kind:'all'},replacePopulated=false) {
+  return planner.preview(f.owner,{tableId:f.table.id,expectedTableRevision:(await f.data()).table.revision,rowScope,selectedColumnIds,replacePopulated});
 }
 async function count(table, tableId) {
   // Table names are internal constants, never user input.
@@ -331,7 +331,7 @@ test('active reservations block column type changes/deletion and row/table delet
   const row = await tables.addRow(f.owner,f.table.id);
   // A queued local formula run needs no vendor, worker, or API.
   await db.pool.query('UPDATE app.cells SET stale=true WHERE row_id=$1 AND column_id=$2',[row.id,output.id]);
-  const preview = await runPreview(f,[output.id]);
+  const preview = await runPreview(f,[output.id],{kind:'all'},true);
   assert.equal(preview.cells.eligible,1);
   const run = await planner.confirm(f.owner,runRequest(preview));
   assert.equal(run.status,'queued');
@@ -403,4 +403,15 @@ test('duplicate CSV headers remain staged until corrected and export returns sto
   const data = await f.data();
   const csv = await transfer.export(f.owner,f.table.id,{tableId:f.table.id,rowScope:{kind:'all'},columnIds:[columns[0].id,columns[2].id],expectedViewRevision:data.view.revision,acknowledgeStoredOutputWarnings:false,neutralizeSpreadsheetText:true});
   assert.equal(csv,'Person name,Company domain\r\n"Ada, Jr",example.test\r\n');
+});
+
+test('populated selected outputs are skipped by default; replacement preview is explicit and consent-bound', async t => {
+  const f=await fixture(t);const table=await tables.create(f.owner,'Replacement consent');let data=await tables.read(f.owner,table.id);const col=data.columns[0];
+  const row=await tables.addRow(f.owner,table.id);await tables.patch(f.owner,table.id,{rowId:row.id,columnId:col.id,expectedVersion:row.cells[col.id].version,value:text('Existing')});
+  await tables.saveColumn(f.owner,table.id,{expectedRevision:col.revision,definition:formula('"Generated"',[])},col.id);
+  await db.pool.query("UPDATE app.cells SET stale=true WHERE row_id=$1 AND column_id=$2",[row.id,col.id]);data=await tables.read(f.owner,table.id);
+  const request={tableId:table.id,expectedTableRevision:data.table.revision,rowScope:{kind:'all'},selectedColumnIds:[col.id]};
+  const skipped=await planner.preview(f.owner,request);assert.equal(skipped.cells.skipped,1);assert.equal(skipped.cells.eligible,0);assert.equal(skipped.requiredConsent.overwritePopulated,false);
+  const replacement=await planner.preview(f.owner,{...request,replacePopulated:true});assert.equal(replacement.cells.eligible,1);assert.equal(replacement.requiredConsent.overwritePopulated,true);
+  await assert.rejects(planner.confirm(f.owner,{...runRequest(replacement),consent:{...consent,overwritePopulated:false}}),code('consent_required'));
 });

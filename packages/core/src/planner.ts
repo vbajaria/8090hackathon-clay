@@ -113,6 +113,16 @@ export class Planner {
   ) {}
   async prepareTx(tx: Tx, ws: string, input: any, retryTargets?: any[]) {
     const data = await loadTable(tx, ws, input.tableId, true);
+    if (
+      input.parentRunId &&
+      !(
+        await tx.query(
+          "SELECT 1 FROM app.runs WHERE id=$1 AND workspace_id=$2 AND table_id=$3",
+          [input.parentRunId, ws, input.tableId],
+        )
+      ).rowCount
+    )
+      fail("not_found");
     if (data.table.revision !== input.expectedTableRevision)
       fail("version_conflict");
     const rows = scopeRows(data, input.rowScope as RowScope);
@@ -148,6 +158,7 @@ export class Planner {
         Object.entries(row.cells).map(([id, v]) => [id, (v as any).value]),
       );
       const supplied = new Set<string>();
+      const unavailable = new Set<string>();
       const rowSelected = retryTargets
         ? retryTargets
             .filter((s) => s.row_id === row.id)
@@ -168,12 +179,25 @@ export class Planner {
           !cell.stale &&
           ["succeeded", "reused"].includes(cell.outcome) &&
           cell.value.value !== null &&
-          cell.value.value !== ""
+          cell.value.value !== "" &&
+          !(input.replacePopulated && rowSelected.includes(col.id))
         ) {
           outcome = "reused";
           supplied.add(col.id);
+        } else if (
+          cell?.value.value !== null &&
+          cell?.value.value !== undefined &&
+          cell.value.value !== "" &&
+          rowSelected.includes(col.id) &&
+          !input.replacePopulated
+        ) {
+          outcome = "skipped";
+          reason = "populated_output";
+          skippedDetails.push({ rowId: row.id, columnId: col.id, reason });
         } else {
-          reason = inputIssue(col, values, supplied);
+          reason = columnDependencies(col).some((id) => unavailable.has(id))
+            ? "dependency_unavailable"
+            : inputIssue(col, values, supplied);
           if (reason) {
             outcome = "skipped";
             skippedDetails.push({ rowId: row.id, columnId: col.id, reason });
@@ -231,6 +255,7 @@ export class Planner {
             }
           }
         }
+        if (outcome === "skipped") unavailable.add(col.id);
         const stepId = uid();
         steps.push({
           id: stepId,
@@ -457,6 +482,7 @@ export class Planner {
           tableId: run.table_id,
           expectedTableRevision: data.table.revision,
           parentRunId: id,
+          replacePopulated: true,
           rowScope: {
             kind: "selected",
             rowIds: [...new Set(targets.map((t) => t.row_id))],
