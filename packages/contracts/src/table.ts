@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import { ApiErrorSchema, apiError, CellTypeSchema, CellValueSchema, ConnectionRefSchema, CountSchema, IdSchema, LIMITS, NonblankSchema, RevisionSchema, TimestampSchema, uniqueIds } from './common.js';
+import { ApiErrorSchema, apiError, CellTypeSchema, CellValueSchema, ConnectionRefSchema, CountSchema, IdSchema, LIMITS, NonblankSchema, RevisionSchema, TextInputMappingSchema, TimestampSchema, uniqueIds } from './common.js';
 import { EmailNameMappingSchema } from './provider.js';
 
 export const ColumnDefinitionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('editable'), valueType: CellTypeSchema }).strict(),
   z.object({ kind: z.literal('formula'), returnType: CellTypeSchema, expression: NonblankSchema, referencedColumnIds: uniqueIds() }).strict(),
-  z.object({ kind: z.literal('company'), connection: ConnectionRefSchema, domainColumnId: IdSchema, output: z.enum(['name', 'website']) }).strict(),
-  z.object({ kind: z.literal('email'), domainColumnId: IdSchema, providers: z.array(z.object({ providerKey: z.enum(['hunter', 'snov', 'tomba']), connection: ConnectionRefSchema, nameMapping: EmailNameMappingSchema }).strict()).min(2).max(10).refine(p => new Set(p.map(v => v.providerKey)).size === p.length, 'Waterfall requires distinct providers') }).strict(),
+  z.object({ kind: z.literal('company'), connection: ConnectionRefSchema, domainInput: TextInputMappingSchema, output: z.enum(['name', 'website']) }).strict(),
+  z.object({ kind: z.literal('email'), domainInput: TextInputMappingSchema, providers: z.array(z.object({ providerKey: z.enum(['hunter', 'snov', 'tomba']), connection: ConnectionRefSchema, nameMapping: EmailNameMappingSchema }).strict()).min(1).max(10).refine(p => new Set(p.map(v => v.providerKey)).size === p.length, 'Waterfall requires distinct providers') }).strict(),
   z.object({ kind: z.literal('ai'), connection: ConnectionRefSchema, model: NonblankSchema, instructionTemplate: NonblankSchema.refine(s => Array.from(s).length <= LIMITS.aiTemplateCharacters, 'Template exceeds 2,000 characters'), referencedColumnIds: uniqueIds() }).strict(),
 ]);
 export const ColumnSchema = z.object({ id: IdSchema, revision: RevisionSchema, name: NonblankSchema, definition: ColumnDefinitionSchema }).strict();

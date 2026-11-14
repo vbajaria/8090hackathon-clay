@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CapabilitySchema, ConnectionRefSchema, CountSchema, IdSchema, NonblankSchema, ProviderKeySchema, RevisionSchema, TimestampSchema } from './common.js';
+import { CapabilitySchema, ConnectionRefSchema, CountSchema, IdSchema, NonblankSchema, ProviderKeySchema, RevisionSchema, TextInputMappingSchema, TimestampSchema } from './common.js';
 
 export const DomainSchema = z.string().max(253).refine(s => {
   const labels = s.split('.');
@@ -10,8 +10,8 @@ export const PersonNameSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('mapped_parts'), givenName: NonblankSchema, familyName: NonblankSchema, source: z.enum(['owner_mapped', 'owner_confirmed']) }).strict(),
 ]);
 export const EmailNameMappingSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('full_name'), fullNameColumnId: IdSchema }).strict(),
-  z.object({ mode: z.literal('mapped_parts'), givenNameColumnId: IdSchema, familyNameColumnId: IdSchema, source: z.enum(['owner_mapped', 'owner_confirmed']) }).strict(),
+  z.object({ mode: z.literal('full_name'), fullNameInput: TextInputMappingSchema }).strict(),
+  z.object({ mode: z.literal('mapped_parts'), givenNameInput: TextInputMappingSchema, familyNameInput: TextInputMappingSchema, source: z.enum(['owner_mapped', 'owner_confirmed']) }).strict(),
 ]);
 export const ProviderRequestSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('company'), domain: DomainSchema, output: z.enum(['name', 'website']) }).strict(),
@@ -43,9 +43,10 @@ export function supportsName(capability: z.infer<typeof ProviderCapabilitiesSche
   return capability.capability === 'email' && capability.nameModes.includes(name.mode);
 }
 const WebsiteSchema = z.string().url().refine(s => { try { const u = new URL(s); return ['http:', 'https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password; } catch { return false; } }, 'Expected an HTTP(S) website without credentials');
+export const UsableEmailSchema = z.string().regex(/^[^\s@]+@[^\s@]+$/u, 'Expected one @, nonempty local/domain parts and no whitespace');
 export const ProviderOutputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('company'), output: z.literal('name'), value: NonblankSchema }).strict(),
-  z.object({ capability: z.literal('email'), value: z.string().email() }).strict(),
+  z.object({ capability: z.literal('email'), value: UsableEmailSchema }).strict(),
   z.object({ capability: z.literal('ai'), value: NonblankSchema }).strict(),
 ]);
 // Company website is separate because discriminated unions require unique tags.

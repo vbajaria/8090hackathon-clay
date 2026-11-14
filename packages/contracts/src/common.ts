@@ -27,6 +27,10 @@ export const CellValueSchema = z.discriminatedUnion('type', [
 ]);
 export type CellValue = z.infer<typeof CellValueSchema>;
 export const uniqueIds = (max: number = LIMITS.columns) => z.array(IdSchema).max(max).refine(ids => new Set(ids).size === ids.length, 'Duplicate IDs');
+export const TextInputMappingSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('column'), columnId: IdSchema }).strict(),
+  z.object({ kind: z.literal('fixed'), value: NonblankSchema }).strict(),
+]);
 export const ConnectionRefSchema = z.object({ id: IdSchema, revision: RevisionSchema }).strict();
 
 export const ERROR_DEFINITIONS = {

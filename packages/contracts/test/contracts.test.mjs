@@ -49,7 +49,7 @@ test('cell mutations require stable IDs and matching editable type', () => {
   const patch = { rowId: id(1), columnId: id(2), expectedVersion: '1', value: { type: 'text', value: 'Avery Lane' } };
   assert.equal(C.checkCellPatch(C.ColumnSchema.parse(column), C.CellPatchSchema.parse(patch)), null);
   assert.equal(C.checkCellPatch(column, { ...patch, value: { type: 'number', value: '1' } }).code, 'invalid_value');
-  assert.equal(C.checkCellPatch({ ...column, definition: { kind: 'company', connection: { id: id(3), revision: '1' }, domainColumnId: id(4), output: 'name' } }, patch).code, 'invalid_value');
+  assert.equal(C.checkCellPatch({ ...column, definition: { kind: 'company', connection: { id: id(3), revision: '1' }, domainInput: { kind: 'column', columnId: id(4) }, output: 'name' } }, patch).code, 'invalid_value');
   reject(C.CellPatchSchema, { ...patch, expectedVersion: undefined });
 });
 test('conflicts expose current value and version, not raw errors', () => {
@@ -108,12 +108,13 @@ test('AI instruction templates enforce character limit', () => {
   reject(C.ColumnDefinitionSchema, { ...definition, instructionTemplate: 'a'.repeat(2001) });
   reject(C.ColumnDefinitionSchema, { ...definition, instructionTemplate: '   ' });
 });
-test('email waterfalls require two distinct compatible candidate mappings', () => {
-  const mapping = { mode: 'mapped_parts', givenNameColumnId: id(1), familyNameColumnId: id(2), source: 'owner_mapped' };
+test('email waterfalls allow owner-selected subsets and reject duplicate providers', () => {
+  const mapping = { mode: 'mapped_parts', givenNameInput: { kind: 'column', columnId: id(1) }, familyNameInput: { kind: 'column', columnId: id(2) }, source: 'owner_mapped' };
   const provider = key => ({ providerKey: key, connection: { id: id(3), revision: '1' }, nameMapping: mapping });
-  const config = { kind: 'email', domainColumnId: id(4), providers: [provider('hunter'), { ...provider('snov'), connection: { id: id(5), revision: '1' } }] };
+  const config = { kind: 'email', domainInput: { kind: 'column', columnId: id(4) }, providers: [provider('hunter'), { ...provider('snov'), connection: { id: id(5), revision: '1' } }] };
   C.ColumnDefinitionSchema.parse(config);
-  reject(C.ColumnDefinitionSchema, { ...config, providers: [provider('hunter')] });
+  C.ColumnDefinitionSchema.parse({ ...config, providers: [provider('hunter')] });
+  reject(C.ColumnDefinitionSchema, { ...config, providers: [] });
   reject(C.ColumnDefinitionSchema, { ...config, providers: [provider('hunter'), provider('hunter')] });
 });
 test('preview includes full waterfall and separately chargeable polling bounds', () => {
@@ -236,4 +237,15 @@ test('invalid website strings produce validation issues rather than throwing', (
     assert.doesNotThrow(() => { result = C.SelectedProviderOutputSchema.safeParse({ capability: 'company', output: 'website', value }); });
     assert.equal(result.success, false);
   }
+});
+
+test('mandatory enrichment inputs support explicit fixed values or column references', () => {
+  C.ColumnDefinitionSchema.parse({ kind: 'company', connection: { id: id(1), revision: '1' }, domainInput: { kind: 'fixed', value: 'juniper.example' }, output: 'name' });
+  C.EmailNameMappingSchema.parse({ mode: 'full_name', fullNameInput: { kind: 'fixed', value: 'Avery Lane' } });
+  reject(C.TextInputMappingSchema, { kind: 'fixed', value: '   ' });
+  reject(C.TextInputMappingSchema, { kind: 'column', columnId: 'missing' });
+});
+test('email usability follows the specified format, without invented deliverability checks', () => {
+  for (const value of ['avery@juniper.example', 'a@b', '名@company.example']) C.UsableEmailSchema.parse(value);
+  for (const value of ['@domain', 'name@', 'a@@b', 'a b@domain', ' a@b']) reject(C.UsableEmailSchema, value);
 });
