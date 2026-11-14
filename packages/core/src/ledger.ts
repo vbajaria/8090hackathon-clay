@@ -82,6 +82,7 @@ export async function recordObservationTx(tx:Tx,workspaceId:string,observation:U
     if(!inserted.rowCount) return;
     const history=(await tx.query<History>('SELECT * FROM app.usage_observations WHERE workspace_id=$1 AND attribution_key=$2 ORDER BY request_time,id',[workspaceId,o.attributionKey])).rows;
     const previous=(await tx.query<{unit_kind:string;currency:string;observation_key:string|null}>('SELECT unit_kind,currency,observation_key FROM app.consumption WHERE workspace_id=$1 AND attribution_key=$2',[workspaceId,o.attributionKey])).rows;
+    const persistedTime=(await tx.query<{request_time:Date}>('SELECT request_time FROM app.consumption WHERE workspace_id=$1 AND attribution_key=$2 LIMIT 1',[workspaceId,o.attributionKey])).rows[0]?.request_time;
     // Orthogonal dimensions: unit totals are never duplicated for multiple currencies.
     const dimensions=[...new Set(history.filter(h=>h.units!==null).map(h=>h.unit_kind!))].map(unit=>({unit,currency:''}));
     dimensions.push(...[...new Set(history.filter(h=>h.reported_amount!==null || h.estimated_amount!==null).map(h=>h.currency!))].map(currency=>({unit:'',currency})));
@@ -91,7 +92,7 @@ export async function recordObservationTx(tx:Tx,workspaceId:string,observation:U
     const attemptId=history.find(h=>h.attempt_id!==null)?.attempt_id??null;
     // The contract currently provides observedAt only. Keep the first attribution
     // timestamp stable rather than assigning late polling/corrections a new month.
-    const first=(await tx.query<{request_time:Date}>('SELECT request_time FROM app.consumption WHERE workspace_id=$1 AND attribution_key=$2 LIMIT 1',[workspaceId,o.attributionKey])).rows[0]?.request_time ?? existing[0]?.request_time ?? new Date(o.observedAt);
+    const first=persistedTime ?? existing[0]?.request_time ?? new Date(o.observedAt);
     for(const d of dimensions) {
       const rows=history.filter(h=>d.unit ? h.unit_kind===d.unit : d.currency ? h.currency===d.currency : true);
       const key=previous.find(p=>p.unit_kind===d.unit && p.currency===d.currency)?.observation_key??null;
