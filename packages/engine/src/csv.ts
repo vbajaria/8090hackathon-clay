@@ -6,7 +6,7 @@ export interface CsvHeaderIssue { sourceIndex: number; code: 'blank_header' | 'd
 /** Preserve the source headers, including invalid ones, for the caller's correction UI. */
 export function csvHeaderIssues(headers: string[]): CsvHeaderIssue[] {
   const names = headers.map(h => h.trim().toLocaleLowerCase('en-US'));
-  return names.flatMap((name, sourceIndex) => !name
+  return names.flatMap<CsvHeaderIssue>((name, sourceIndex) => !name
     ? [{ sourceIndex, code: 'blank_header' as const }]
     : names.indexOf(name) !== names.lastIndexOf(name)
       ? [{ sourceIndex, code: 'duplicate_header' as const }] : []);
