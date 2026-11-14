@@ -184,6 +184,11 @@ test('table and typed cells persist; stale edits return current latest; client i
   error(conflict,'version_conflict');
   assert.deepEqual(conflict.data.current,latest);
   assert.deepEqual((await f.data()).rows[0].cells[col.id],latest);
+  // A fresh app instance reads persisted values, not a process-local table cache.
+  const reopened = createApp({db,key:f.key,authOptions:f.authOptions,policies:f.policies,gateway:f.gateway});
+  const reopenedResponse = await reopened.handle(new Request(`${origin}/api${f.tablePath}`,{headers:{cookie:f.a.cookie}}));
+  assert.equal(reopenedResponse.status,200);
+  assert.deepEqual((await reopenedResponse.json()).rows[0].cells[col.id],latest);
   const persisted = (await db.pool.query('SELECT value,version::text FROM app.cells WHERE row_id=$1 AND column_id=$2',[row.id,col.id])).rows[0];
   assert.deepEqual(persisted,{value:latest.value,version:latest.version});
   error(await f.http('/tables',{method:'POST',cookie:f.b.cookie,body:{name:'spoof',ownerId:f.a.user.id}}),'invalid_value');
@@ -325,7 +330,7 @@ test('malformed JSON, UUIDs, mappings, and UTF-8 body size fail safely rather th
   assert.equal((await f.ok('/tables',{cookie:f.a.cookie})).length,1);
 });
 
-test('unexpected database failure returns only the canonical safe error envelope', async t => {
+test('unexpected database/provider failures return only the canonical safe error envelope', async t => {
   const f = await fixture(t);
   const rawDiagnostic = 'SQL SELECT private lead; provider raw payload; apiKey=fixture-credential; postgresql://user:password@db';
   // Inject one failure at the transaction boundary, not a fake persistence database.
@@ -338,4 +343,21 @@ test('unexpected database failure returns only the canonical safe error envelope
   assert.deepEqual(JSON.parse(body),{error:apiError('internal_error')});
   assert.ok(!body.includes(rawDiagnostic));
   assert.ok(!body.includes('fixture-credential'));
+  const connection = await f.ok('/connections',{method:'POST',cookie:f.a.cookie,body:{providerKey:'hunter',credentials:{apiKey:'fixture-credential'},acknowledgeDirectBilling:true}});
+  const failingGateway = {...f.gateway,validate:async () => {throw new Error(rawDiagnostic);}};
+  const providerFailureApp = createApp({db,key:f.key,authOptions:f.authOptions,policies:f.policies,gateway:failingGateway});
+  const providerResponse = await providerFailureApp.handle(new Request(`${origin}/api/connections/${connection.id}/validate`,{method:'POST',headers:{cookie:f.a.cookie,origin,'content-type':'application/json'},body:'{}'}));
+  assert.equal(providerResponse.status,500);
+  assert.deepEqual(await providerResponse.json(),{error:apiError('internal_error')});
+});
+
+test('valid JSON with malformed import mapping shapes returns safe 4xx', async t => {
+  const f = await fixture(t);
+  const failures = [];
+  for (const mappings of [{},[null],[42]]) {
+    const result = await f.http(`${f.tablePath}/import/preview`,{method:'POST',cookie:f.a.cookie,body:{csvText:'Name\nAda',mappings}});
+    if (result.status >= 500) failures.push({request:result.request,body:{csvText:'Name\nAda',mappings},status:result.status,response:result.data});
+    else assert.ok(result.status >= 400 && result.status < 500, `${result.request}: ${result.rawBody}`);
+  }
+  assert.deepEqual(failures,[],JSON.stringify(failures,null,2));
 });
