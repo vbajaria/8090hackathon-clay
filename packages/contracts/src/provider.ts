@@ -42,7 +42,7 @@ export const ProviderCapabilitiesSchema = z.object({
 export function supportsName(capability: z.infer<typeof ProviderCapabilitiesSchema>, name: z.infer<typeof PersonNameSchema>): boolean {
   return capability.capability === 'email' && capability.nameModes.includes(name.mode);
 }
-const WebsiteSchema = z.string().url().refine(s => { const u = new URL(s); return ['http:', 'https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password; }, 'Expected an HTTP(S) website without credentials');
+const WebsiteSchema = z.string().url().refine(s => { try { const u = new URL(s); return ['http:', 'https:'].includes(u.protocol) && !!u.hostname && !u.username && !u.password; } catch { return false; } }, 'Expected an HTTP(S) website without credentials');
 export const ProviderOutputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('company'), output: z.literal('name'), value: NonblankSchema }).strict(),
   z.object({ capability: z.literal('email'), value: z.string().email() }).strict(),
@@ -71,3 +71,5 @@ export const ProviderAttemptSchema = z.object({
 export type ProviderRequest = z.infer<typeof ProviderRequestSchema>;
 export type NormalizedProviderResult = z.infer<typeof NormalizedProviderResultSchema>;
 export type ProviderCapabilities = z.infer<typeof ProviderCapabilitiesSchema>;
+
+export const mayAdvanceWaterfall = (result: NormalizedProviderResult): boolean => result.status === 'no_result';

@@ -26,7 +26,7 @@ export const CellValueSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('boolean'), value: z.boolean().nullable() }).strict(),
 ]);
 export type CellValue = z.infer<typeof CellValueSchema>;
-export const uniqueIds = (max = LIMITS.columns) => z.array(IdSchema).max(max).refine(ids => new Set(ids).size === ids.length, 'Duplicate IDs');
+export const uniqueIds = (max: number = LIMITS.columns) => z.array(IdSchema).max(max).refine(ids => new Set(ids).size === ids.length, 'Duplicate IDs');
 export const ConnectionRefSchema = z.object({ id: IdSchema, revision: RevisionSchema }).strict();
 
 export const ERROR_DEFINITIONS = {
