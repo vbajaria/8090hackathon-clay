@@ -93,6 +93,7 @@ external calls already made. Recovery requires separate reconciliation design.
 ## Checks and CI
 
 ```sh
+node --test .8090/workspace-setup.test.mjs
 pnpm build
 pnpm typecheck
 pnpm test:unit
@@ -151,8 +152,10 @@ and operations ownership. Local setup is not evidence that production is ready.
 
 ## Verification status for this change
 
-Finite scripts can be syntax-checked and their pure configuration/readiness logic
-can be tested without stopping or modifying the active parent database. The new
+Script syntax and eight non-destructive regression checks passed in the current
+workspace. Tests cover safe settings, key preservation/private files, finite waits,
+cluster lifecycle ownership and failure paths using mocked system commands. A real
+`pg_isready` probe also passed without stopping or modifying the parent database. The new
 Docker image, full workspace reload, terminal startup, health endpoint and complete
 CI require the parent implementation and a coordinated subsequent verification.
 Do not treat these unverified container/reload/deployment gates as passed.

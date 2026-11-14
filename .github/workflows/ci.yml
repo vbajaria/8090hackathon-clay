@@ -49,6 +49,8 @@ jobs:
         run: |
           node --check scripts/workspace-setup.mjs
           node --check scripts/wait-database.mjs
+      - name: Non-destructive workspace setup regression checks
+        run: node --test .8090/workspace-setup.test.mjs
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm db:migrate
