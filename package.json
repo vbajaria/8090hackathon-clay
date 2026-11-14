@@ -11,7 +11,7 @@
     "build": "pnpm build:packages && pnpm --filter @leadwork/web build && pnpm --filter @leadwork/worker build",
     "typecheck": "pnpm -r typecheck",
     "test:unit": "node --test packages/contracts/test/*.test.mjs && pnpm --filter @leadwork/engine test && pnpm --filter @leadwork/providers test && pnpm --filter @leadwork/web test",
-    "test": "pnpm build:packages && pnpm test:unit && pnpm --filter @leadwork/core test",
+    "test": "pnpm build:packages && pnpm test:unit && node scripts/test-core.mjs",
     "db:migrate": "pnpm --filter @leadwork/core migrate",
     "dev": "pnpm --filter @leadwork/web dev",
     "worker": "pnpm --filter @leadwork/worker build && pnpm --filter @leadwork/worker start"

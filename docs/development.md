@@ -159,3 +159,7 @@ cluster lifecycle ownership and failure paths using mocked system commands. A re
 Docker image, full workspace reload, terminal startup, health endpoint and complete
 CI require the parent implementation and a coordinated subsequent verification.
 Do not treat these unverified container/reload/deployment gates as passed.
+
+## Isolated verification database
+
+`pnpm test` uses `leadwork_test` locally, which finite workspace setup creates separately from the running app's `leadwork` database. This prevents the managed worker from claiming synthetic acceptance-test jobs. Never point fixtures at production. For another development database, supply `TEST_DATABASE_URL` for an isolated test database. CI uses its disposable service database. The low-level core package test command consumes `DATABASE_URL` directly and must not share a database with an active worker.

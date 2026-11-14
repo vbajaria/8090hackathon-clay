@@ -72,6 +72,8 @@ export async function setup() {
     postgres(['psql', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-c', "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'leadwork') THEN CREATE ROLE leadwork LOGIN PASSWORD 'leadwork-local-only'; END IF; END $$;"]);
     const exists = postgres(['psql', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-Atc', "SELECT 1 FROM pg_database WHERE datname='leadwork'"], { stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' });
     if (exists.stdout.trim() !== '1') postgres(['createdb', '--owner=leadwork', 'leadwork']);
+    const testExists = postgres(['psql', '-v', 'ON_ERROR_STOP=1', '-d', 'postgres', '-Atc', "SELECT 1 FROM pg_database WHERE datname='leadwork_test'"], { stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' });
+    if (testExists.stdout.trim() !== '1') postgres(['createdb', '--owner=leadwork', 'leadwork_test']);
     command('pnpm', ['db:migrate'], { env: { ...process.env, ...config } });
     saveMissing(rootPath, rootEnv, config);
     saveMissing(webPath, webEnv, config);
