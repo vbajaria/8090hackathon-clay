@@ -1,4 +1,8 @@
-import { RunProgressSchema, RunResultSchema } from "@leadwork/contracts";
+import {
+  IdSchema,
+  RunProgressSchema,
+  RunResultSchema,
+} from "@leadwork/contracts";
 import { Database, fail } from "./db.js";
 import { workspace, ownedTable } from "./tables.js";
 import { finalizeRuns } from "./planner.js";
@@ -17,17 +21,32 @@ export class RunService {
       const result = [];
       for (const run of runs) {
         const steps = (
-          await tx.query("SELECT outcome FROM app.steps WHERE run_id=$1", [
-            run.id,
-          ])
+          await tx.query(
+            "SELECT outcome,COUNT(*)::int AS count FROM app.steps WHERE run_id=$1 GROUP BY outcome",
+            [run.id],
+          )
         ).rows;
         result.push(progress(run, steps));
       }
       return result;
     });
   }
-  async detail(owner: string, id: string) {
+  async detail(owner: string, id: string, cursor?: string, limit = 50) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 250)
+      fail("invalid_value");
+    let after: any;
+    if (cursor) {
+      try {
+        after = JSON.parse(Buffer.from(cursor, "base64url").toString());
+      } catch {
+        fail("invalid_value");
+      }
+      if (after.runId !== id) fail("invalid_value");
+      IdSchema.parse(after.rowId);
+      IdSchema.parse(after.stepId);
+    }
     return this.db.transaction(async (tx) => {
+      await tx.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const ws = await workspace(tx, owner);
       const run = (
         await tx.query(
@@ -38,14 +57,22 @@ export class RunService {
       if (!run) fail("not_found");
       const steps = (
         await tx.query(
-          "SELECT s.*,c.stale FROM app.steps s LEFT JOIN app.cells c ON c.row_id=s.row_id AND c.column_id=s.column_id WHERE s.run_id=$1 ORDER BY s.row_id,s.id",
+          `SELECT s.*,c.stale FROM app.steps s LEFT JOIN app.cells c ON c.row_id=s.row_id AND c.column_id=s.column_id WHERE s.run_id=$1${after ? " AND (s.row_id,s.id)>($3::uuid,$4::uuid)" : ""} ORDER BY s.row_id,s.id LIMIT $2`,
+          [id, limit + 1, ...(after ? [after.rowId, after.stepId] : [])],
+        )
+      ).rows;
+      const hasMore = steps.length > limit;
+      steps.splice(limit);
+      const counts = (
+        await tx.query(
+          "SELECT outcome,COUNT(*)::int AS count FROM app.steps WHERE run_id=$1 GROUP BY outcome",
           [id],
         )
       ).rows;
       const attempts = (
         await tx.query(
-          "SELECT a.* FROM app.attempts a JOIN app.steps s ON s.id=a.step_id WHERE s.run_id=$1 ORDER BY a.created_at,a.position,a.id",
-          [id],
+          "SELECT a.* FROM app.attempts a WHERE a.step_id=ANY($1::uuid[]) ORDER BY a.created_at,a.position,a.id",
+          [steps.map((s) => s.id)],
         )
       ).rows;
       const results = steps.map((s) => {
@@ -82,7 +109,16 @@ export class RunService {
         };
       });
       return {
-        progress: progress(run, steps),
+        progress: progress(run, counts),
+        nextCursor: hasMore
+          ? Buffer.from(
+              JSON.stringify({
+                runId: id,
+                rowId: steps.at(-1)!.row_id,
+                stepId: steps.at(-1)!.id,
+              }),
+            ).toString("base64url")
+          : null,
         results,
         attempts: attempts.map((a) => ({
           id: a.id,
@@ -160,15 +196,19 @@ function progress(run: any, steps: any[]) {
     canceled: 0,
     unknown: 0,
   };
-  for (const s of steps) counts[s.outcome as keyof typeof counts]++;
+  for (const s of steps)
+    counts[s.outcome as keyof typeof counts] += s.count ?? 1;
   return {
     ...RunProgressSchema.parse({
       id: run.id,
       tableId: run.table_id,
       parentRunId: run.parent_run_id,
       status: run.status,
-      total: steps.length,
-      terminal: steps.length - counts.queued - counts.running,
+      total: Object.values(counts).reduce((a, b) => a + b, 0),
+      terminal:
+        Object.values(counts).reduce((a, b) => a + b, 0) -
+        counts.queued -
+        counts.running,
       counts,
     }),
     createdAt: new Date(run.created_at).toISOString(),

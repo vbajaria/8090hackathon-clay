@@ -319,7 +319,12 @@ export function createApp(options: AppOptions = {}) {
           const t = url.searchParams.get("tableId");
           result = await runs.list(owner, t ? IdSchema.parse(t) : undefined);
         } else if (path.length === 2 && method === "GET")
-          result = await runs.detail(owner, id());
+          result = await runs.detail(
+            owner,
+            id(),
+            url.searchParams.get("cursor") ?? undefined,
+            Number(url.searchParams.get("limit") ?? 50),
+          );
         else if (path[2] === "cancel" && method === "POST")
           result = await runs.cancel(owner, id());
         else if (path[2] === "retry-preview" && method === "POST")

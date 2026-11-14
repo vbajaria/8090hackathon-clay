@@ -268,6 +268,11 @@ export class TransferService {
           "INSERT INTO app.columns(id,table_id,name,position,definition) VALUES($1,$2,$3,$4,$5)",
           [c.id, p.table_id, c.name, data.columns.length + i, c.definition],
         );
+      if (raw.newColumns.length)
+        await tx.query(
+          "UPDATE app.views SET definition=jsonb_set(definition,'{visibleColumnIds}',(definition->'visibleColumnIds')||to_jsonb($2::text[])),revision=revision+1 WHERE table_id=$1",
+          [p.table_id, raw.newColumns.map((c: Column) => c.id)],
+        );
       const columns = [...data.columns, ...raw.newColumns];
       let newIndex = 0;
       const destIds = raw.mappings.map((m: any) =>

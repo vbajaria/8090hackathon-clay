@@ -415,3 +415,14 @@ test('populated selected outputs are skipped by default; replacement preview is 
   const replacement=await planner.preview(f.owner,{...request,replacePopulated:true});assert.equal(replacement.cells.eligible,1);assert.equal(replacement.requiredConsent.overwritePopulated,true);
   await assert.rejects(planner.confirm(f.owner,{...runRequest(replacement),consent:{...consent,overwritePopulated:false}}),code('consent_required'));
 });
+
+test('run results paginate at the server while aggregate progress covers the full run', async t => {
+  const f=await fixture(t);const output=await tables.saveColumn(f.owner,f.table.id,{name:'Paged formula',definition:formula('"value"',[])});
+  for(let i=0;i<3;i++)await tables.addRow(f.owner,f.table.id);
+  const p=await runPreview(f,[output.id]);const run=await planner.confirm(f.owner,runRequest(p));
+  const {RunService}=await import('../dist/runs.js');const service=new RunService(db);
+  const first=await service.detail(f.owner,run.id,undefined,2);assert.equal(first.progress.total,3);assert.equal(first.results.length,2);assert.ok(first.nextCursor);
+  const last=await service.detail(f.owner,run.id,first.nextCursor,2);assert.equal(last.results.length,1);assert.equal(last.progress.total,3);assert.equal(last.nextCursor,null);
+  assert.equal(new Set([...first.results,...last.results].map(r=>r.stepId)).size,3);
+  await assert.rejects(service.detail(f.other,run.id,first.nextCursor,2),code('not_found'));
+});
