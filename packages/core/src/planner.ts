@@ -1,23 +1,476 @@
-import {RunPreviewRequestSchema,RunPreviewSchema,RunConfirmRequestSchema,checkRunConfirmation, type Column,type CellValue,type RowScope} from '@leadwork/contracts';
-import {topologicalColumns,columnDependencies,resolveInstructions,evaluateFormula} from '@leadwork/engine';
-import {Database,fail,type Tx} from './db.js';
-import {workspace,loadTable,ownedTable,scopeRows,uid,nullValue} from './tables.js';
-import {hash,ownedPlan} from './transfer.js';
-import type {Policy} from './connections.js';
-export const refs=(c:Column)=>c.definition.kind==='company'||c.definition.kind==='ai'?[{key:c.definition.kind==='company'?'pdl':'openai',ref:c.definition.connection}]:c.definition.kind==='email'?c.definition.providers.map(p=>({key:p.providerKey,ref:p.connection})):[];
-export function fingerprint(data:any,rows:any[],connections:any[]){return hash({table:data.table.revision,columns:data.columns,rows:rows.map(r=>({id:r.id,cells:r.cells})),connections:connections.map(c=>({id:c.id,revision:String(c.revision),status:c.status})),view:data.view.revision});}
-export function inputText(mapping:any,values:Record<string,CellValue>){return mapping.kind==='fixed'?mapping.value:values[mapping.columnId]?.value==null?'':String(values[mapping.columnId].value);}
-export function inputIssue(col:Column,values:Record<string,CellValue>,willSupply:Set<string>){const d=col.definition;const missing=(id:string)=>!willSupply.has(id)&&(values[id]?.value===null||values[id]===undefined||values[id].value==='');if(d.kind==='formula')return columnDependencies(col).some(missing)?'missing_input':null;if(d.kind==='ai'){const resolved=resolveInstructions(d.instructionTemplate,values);if(resolved.missingColumnIds.some(id=>!willSupply.has(id)))return 'missing_input';if(Buffer.byteLength(resolved.resolvedInstructions)>60_000)return 'input_too_large';return null;}if(d.kind==='company'||d.kind==='email'){const m=d.domainInput;if(m.kind==='column'&&willSupply.has(m.columnId))return null;const domain=inputText(m,values);if(!domain)return 'missing_input';if(!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(domain))return 'invalid_domain';if(d.kind==='email')for(const p of d.providers){const maps=p.nameMapping.mode==='full_name'?[p.nameMapping.fullNameInput]:[p.nameMapping.givenNameInput,p.nameMapping.familyNameInput];if(maps.some(m=>m.kind==='column'?missing(m.columnId):!m.value.trim()))return 'missing_input';}}return null;}
-export class Planner {
- constructor(readonly db:Database,readonly policies:Policy[]){}
- async prepareTx(tx:Tx,ws:string,input:any,retryTargets?:any[]){const data=await loadTable(tx,ws,input.tableId,true);if(data.table.revision!==input.expectedTableRevision)fail('version_conflict');const rows=scopeRows(data,input.rowScope as RowScope);if(!rows.length)fail('invalid_value');const closure=topologicalColumns(data.columns,input.selectedColumnIds);if(!closure.length||input.selectedColumnIds.some((id:string)=>!closure.some(c=>c.id===id)))fail('invalid_value');const connections=(await tx.query('SELECT * FROM app.connections WHERE workspace_id=$1',[ws])).rows;const byId=new Map(connections.map(c=>[c.id,c]));const blockers=new Set<string>();const providers=new Map<string,any>();const steps:any[]=[];const skippedDetails:any[]=[];const requiredConsent={overwritePopulated:false,refreshStale:false,unknownPrice:false,possibleDuplicateCharge:retryTargets?.some(s=>s.outcome==='unknown')??false};let replacements=0;for(const row of rows){const values:Record<string,CellValue>=Object.fromEntries(Object.entries(row.cells).map(([id,v])=>[id,(v as any).value]));const supplied=new Set<string>();const rowSelected=retryTargets?retryTargets.filter(s=>s.row_id===row.id).map(s=>s.column_id):input.selectedColumnIds;const rowClosure=new Set(topologicalColumns(data.columns,rowSelected).map(c=>c.id));for(const col of closure){const cell=row.cells[col.id];let outcome='queued',reason:string|null=null;if(!rowClosure.has(col.id)){outcome='skipped';reason='not_retry_target';}else if(cell&&!cell.stale&&['succeeded','reused'].includes(cell.outcome)&&cell.value.value!==null&&cell.value.value!==''){outcome='reused';supplied.add(col.id);}else{reason=inputIssue(col,values,supplied);if(reason){outcome='skipped';skippedDetails.push({rowId:row.id,columnId:col.id,reason});}else{supplied.add(col.id);if(cell?.stale)requiredConsent.refreshStale=true;if(cell?.value.value!==null&&cell?.value.value!==undefined&&cell.value.value!==''){requiredConsent.overwritePopulated=true;replacements++;}for(const {key,ref} of refs(col)){const conn=byId.get(ref.id),policy=this.policies.find(p=>p.providerKey===key);if(!conn||conn.status!=='ready'||String(conn.revision)!==ref.revision||conn.provider_key!==key)blockers.add('provider_not_ready');if(!policy?.enabledForRealRequests)blockers.add('unverified_provider_policy');const mapKey=ref.id+':'+col.definition.kind;const existing=providers.get(mapKey);const polls=policy?.execution==='asynchronous'?policy.policy.maxPolls??null:0;if(existing){existing.eligibleRows++;existing.lookupStarts++;if(existing.chargeablePolls!==null&&polls!==null)existing.chargeablePolls+=polls;else existing.chargeablePolls=null;}else providers.set(mapKey,{providerKey:key,capability:col.definition.kind==='company'?'company':col.definition.kind==='ai'?'ai':'email',connection:ref,eligibleRows:1,lookupStarts:1,chargeablePolls:polls,cost:{kind:'unknown'}});requiredConsent.unknownPrice=true;}}}const stepId=uid();steps.push({id:stepId,rowId:row.id,columnId:col.id,outcome,reason,sourceStepId:outcome==='reused'?cell?.sourceStepId:null,value:outcome==='reused'?cell.value:null,dependencies:columnDependencies(col).filter(cid=>closure.some(c=>c.id===cid))});}}
- // Eligibility counts are cells, provider eligibleRows deduplicates rows even if provider serves several outputs.
- const counts=[...providers.values()];for(const p of counts)p.eligibleRows=Math.min(p.eligibleRows,rows.length);
- if((await tx.query('SELECT 1 FROM app.reservations WHERE table_id=$1 AND row_id=ANY($2::uuid[]) AND column_id=ANY($3::uuid[]) LIMIT 1',[input.tableId,rows.map(r=>r.id),closure.map(c=>c.id)])).rowCount)blockers.add('active_work');const max=counts.some(p=>p.chargeablePolls===null)?null:counts.reduce((n,p)=>n+p.lookupStarts+p.chargeablePolls,0);
- const preview=RunPreviewSchema.parse({id:uid(),revision:'1',tableId:input.tableId,expectedTableRevision:data.table.revision,expiresAt:new Date(Date.now()+10*60_000).toISOString(),inputFingerprint:fingerprint(data,rows,connections),parentRunId:input.parentRunId??null,rowIds:rows.map(r=>r.id),selectedColumnIds:input.selectedColumnIds,prerequisiteColumnIds:closure.filter(c=>!input.selectedColumnIds.includes(c.id)).map(c=>c.id),cells:{eligible:steps.filter(s=>s.outcome==='queued').length,reused:steps.filter(s=>s.outcome==='reused').length,skipped:steps.filter(s=>s.outcome==='skipped').length},providers:counts,maximumExternalRequests:max,requiredConsent,blockers:[...blockers]});const rowSnapshots=rows.map(r=>({rowId:r.id,values:Object.fromEntries(Object.entries(r.cells).map(([id,c])=>[id,(c as any).value])),versions:Object.fromEntries(Object.entries(r.cells).map(([id,c])=>[id,(c as any).version]))}));const payload={preview:{...preview,skippedDetails,replacements},columns:data.columns,closure:closure.map(c=>c.id),steps,rowSnapshots};await tx.query("INSERT INTO app.plans(id,workspace_id,table_id,kind,expires_at,payload) VALUES($1,$2,$3,'run',$4,$5)",[preview.id,ws,input.tableId,preview.expiresAt,payload]);return payload.preview;}
- async preview(owner:string,input:unknown){const req=RunPreviewRequestSchema.parse(input);return this.db.transaction(async tx=>this.prepareTx(tx,await workspace(tx,owner),req));}
- async confirm(owner:string,input:unknown){const req=RunConfirmRequestSchema.parse(input);return this.db.transaction(async tx=>{const ws=await workspace(tx,owner);const initial=await ownedPlan(tx,ws,req.previewId,'run',false);await ownedTable(tx,ws,initial.table_id,true);const prior=(await tx.query('SELECT id,table_id,status,request_fingerprint FROM app.runs WHERE workspace_id=$1 AND idempotency_key=$2',[ws,req.idempotencyKey])).rows[0];const requestHash=hash(req);if(prior){if(prior.request_fingerprint!==requestHash)fail('idempotency_conflict');return {id:prior.id,tableId:prior.table_id,status:prior.status};}const p=await ownedPlan(tx,ws,req.previewId,'run');const error=checkRunConfirmation(p.payload.preview,req,new Date());if(error)fail(error.code);const data=await loadTable(tx,ws,p.table_id);const connections=(await tx.query('SELECT * FROM app.connections WHERE workspace_id=$1',[ws])).rows;if(fingerprint(data,data.rows.filter(r=>p.payload.preview.rowIds.includes(r.id)),connections)!==p.payload.preview.inputFingerprint)fail('version_conflict');const id=uid();await tx.query("INSERT INTO app.runs(id,workspace_id,table_id,parent_run_id,status,idempotency_key,request_fingerprint,snapshot) VALUES($1,$2,$3,$4,'queued',$5,$6,$7)",[id,ws,p.table_id,p.payload.preview.parentRunId,req.idempotencyKey,requestHash,{columns:p.payload.columns,closure:p.payload.closure,consent:req.consent}]);for(const row of p.payload.rowSnapshots)await tx.query('INSERT INTO app.run_rows(run_id,table_id,row_id,values,source_versions) VALUES($1,$2,$3,$4,$5)',[id,p.table_id,row.rowId,row.values,row.versions]);for(const step of p.payload.steps){const deps=p.payload.steps.filter((s:any)=>s.rowId===step.rowId&&step.dependencies.includes(s.columnId)).map((s:any)=>s.id);await tx.query('INSERT INTO app.steps(id,run_id,table_id,row_id,column_id,prerequisite_ids,outcome,result,reason,source_step_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[step.id,id,p.table_id,step.rowId,step.columnId,deps,step.outcome,step.value,step.reason,step.sourceStepId]);if(step.outcome==='queued'){if((await tx.query('SELECT 1 FROM app.reservations WHERE row_id=$1 AND column_id=$2',[step.rowId,step.columnId])).rowCount)fail('active_work');await tx.query('INSERT INTO app.reservations(row_id,column_id,step_id,table_id) VALUES($1,$2,$3,$4)',[step.rowId,step.columnId,step.id,p.table_id]);}}
- await finalizeRuns(tx,id);return {id,tableId:p.table_id,status:(await tx.query('SELECT status FROM app.runs WHERE id=$1',[id])).rows[0].status};});}
- async retry(owner:string,id:string,input:any){return this.db.transaction(async tx=>{const ws=await workspace(tx,owner),run=(await tx.query('SELECT * FROM app.runs WHERE id=$1 AND workspace_id=$2',[id,ws])).rows[0];if(!run)fail('not_found');const allowed=['failed','skipped','no_result','canceled','unknown'];const include=input.includeOutcomes??['failed'];if(!Array.isArray(include)||!include.length||include.some(x=>!allowed.includes(x)))fail('invalid_value');const targets=(await tx.query('SELECT * FROM app.steps WHERE run_id=$1 AND outcome=ANY($2::text[])',[id,include])).rows.filter(s=>!input.targets||input.targets.some((t:any)=>t.rowId===s.row_id&&t.columnId===s.column_id));if(!targets.length)fail('invalid_value');const data=await loadTable(tx,ws,run.table_id,true);return this.prepareTx(tx,ws,{tableId:run.table_id,expectedTableRevision:data.table.revision,parentRunId:id,rowScope:{kind:'selected',rowIds:[...new Set(targets.map(t=>t.row_id))]},selectedColumnIds:[...new Set(targets.map(t=>t.column_id))]},targets);});}
+import {
+  RunPreviewRequestSchema,
+  RunPreviewSchema,
+  RunConfirmRequestSchema,
+  checkRunConfirmation,
+  type Column,
+  type CellValue,
+  type RowScope,
+} from "@leadwork/contracts";
+import {
+  topologicalColumns,
+  columnDependencies,
+  resolveInstructions,
+  evaluateFormula,
+} from "@leadwork/engine";
+import { Database, fail, type Tx } from "./db.js";
+import {
+  workspace,
+  loadTable,
+  ownedTable,
+  scopeRows,
+  uid,
+  nullValue,
+} from "./tables.js";
+import { hash, ownedPlan } from "./transfer.js";
+import type { Policy } from "./connections.js";
+export const refs = (c: Column) =>
+  c.definition.kind === "company" || c.definition.kind === "ai"
+    ? [
+        {
+          key: c.definition.kind === "company" ? "pdl" : "openai",
+          ref: c.definition.connection,
+        },
+      ]
+    : c.definition.kind === "email"
+      ? c.definition.providers.map((p) => ({
+          key: p.providerKey,
+          ref: p.connection,
+        }))
+      : [];
+export function fingerprint(data: any, rows: any[], connections: any[]) {
+  return hash({
+    table: data.table.revision,
+    columns: data.columns,
+    rows: rows.map((r) => ({ id: r.id, cells: r.cells })),
+    connections: connections.map((c) => ({
+      id: c.id,
+      revision: String(c.revision),
+      status: c.status,
+    })),
+    view: data.view.revision,
+  });
 }
-export async function finalizeRuns(tx:Tx,id?:string){await tx.query(`UPDATE app.runs r SET status=CASE WHEN status='cancel_requested' THEN 'canceled' ELSE 'completed' END,completed_at=now() WHERE status IN('queued','running','cancel_requested')${id?' AND id=$1':''} AND NOT EXISTS(SELECT 1 FROM app.steps s WHERE s.run_id=r.id AND s.outcome IN('queued','running'))`,id?[id]:[]);}
+export function inputText(mapping: any, values: Record<string, CellValue>) {
+  return mapping.kind === "fixed"
+    ? mapping.value
+    : values[mapping.columnId]?.value == null
+      ? ""
+      : String(values[mapping.columnId].value);
+}
+export function inputIssue(
+  col: Column,
+  values: Record<string, CellValue>,
+  willSupply: Set<string>,
+) {
+  const d = col.definition;
+  const missing = (id: string) =>
+    !willSupply.has(id) &&
+    (values[id]?.value === null ||
+      values[id] === undefined ||
+      values[id].value === "");
+  if (d.kind === "formula")
+    return columnDependencies(col).some(missing) ? "missing_input" : null;
+  if (d.kind === "ai") {
+    const resolved = resolveInstructions(d.instructionTemplate, values);
+    if (resolved.missingColumnIds.some((id) => !willSupply.has(id)))
+      return "missing_input";
+    if (Buffer.byteLength(resolved.resolvedInstructions) > 60_000)
+      return "input_too_large";
+    return null;
+  }
+  if (d.kind === "company" || d.kind === "email") {
+    const m = d.domainInput;
+    if (m.kind === "column" && willSupply.has(m.columnId)) return null;
+    const domain = inputText(m, values);
+    if (!domain) return "missing_input";
+    if (
+      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(
+        domain,
+      )
+    )
+      return "invalid_domain";
+    if (d.kind === "email")
+      for (const p of d.providers) {
+        const maps =
+          p.nameMapping.mode === "full_name"
+            ? [p.nameMapping.fullNameInput]
+            : [p.nameMapping.givenNameInput, p.nameMapping.familyNameInput];
+        if (
+          maps.some((m) =>
+            m.kind === "column" ? missing(m.columnId) : !m.value.trim(),
+          )
+        )
+          return "missing_input";
+      }
+  }
+  return null;
+}
+export class Planner {
+  constructor(
+    readonly db: Database,
+    readonly policies: Policy[],
+  ) {}
+  async prepareTx(tx: Tx, ws: string, input: any, retryTargets?: any[]) {
+    const data = await loadTable(tx, ws, input.tableId, true);
+    if (data.table.revision !== input.expectedTableRevision)
+      fail("version_conflict");
+    const rows = scopeRows(data, input.rowScope as RowScope);
+    if (!rows.length) fail("invalid_value");
+    const closure = topologicalColumns(data.columns, input.selectedColumnIds);
+    if (
+      !closure.length ||
+      input.selectedColumnIds.some(
+        (id: string) => !closure.some((c) => c.id === id),
+      )
+    )
+      fail("invalid_value");
+    const connections = (
+      await tx.query("SELECT * FROM app.connections WHERE workspace_id=$1", [
+        ws,
+      ])
+    ).rows;
+    const byId = new Map(connections.map((c) => [c.id, c]));
+    const blockers = new Set<string>();
+    const providers = new Map<string, any>();
+    const steps: any[] = [];
+    const skippedDetails: any[] = [];
+    const requiredConsent = {
+      overwritePopulated: false,
+      refreshStale: false,
+      unknownPrice: false,
+      possibleDuplicateCharge:
+        retryTargets?.some((s) => s.outcome === "unknown") ?? false,
+    };
+    let replacements = 0;
+    for (const row of rows) {
+      const values: Record<string, CellValue> = Object.fromEntries(
+        Object.entries(row.cells).map(([id, v]) => [id, (v as any).value]),
+      );
+      const supplied = new Set<string>();
+      const rowSelected = retryTargets
+        ? retryTargets
+            .filter((s) => s.row_id === row.id)
+            .map((s) => s.column_id)
+        : input.selectedColumnIds;
+      const rowClosure = new Set(
+        topologicalColumns(data.columns, rowSelected).map((c) => c.id),
+      );
+      for (const col of closure) {
+        const cell = row.cells[col.id];
+        let outcome = "queued",
+          reason: string | null = null;
+        if (!rowClosure.has(col.id)) {
+          outcome = "skipped";
+          reason = "not_retry_target";
+        } else if (
+          cell &&
+          !cell.stale &&
+          ["succeeded", "reused"].includes(cell.outcome) &&
+          cell.value.value !== null &&
+          cell.value.value !== ""
+        ) {
+          outcome = "reused";
+          supplied.add(col.id);
+        } else {
+          reason = inputIssue(col, values, supplied);
+          if (reason) {
+            outcome = "skipped";
+            skippedDetails.push({ rowId: row.id, columnId: col.id, reason });
+          } else {
+            supplied.add(col.id);
+            if (cell?.stale) requiredConsent.refreshStale = true;
+            if (
+              cell?.value.value !== null &&
+              cell?.value.value !== undefined &&
+              cell.value.value !== ""
+            ) {
+              requiredConsent.overwritePopulated = true;
+              replacements++;
+            }
+            for (const { key, ref } of refs(col)) {
+              const conn = byId.get(ref.id),
+                policy = this.policies.find((p) => p.providerKey === key);
+              if (
+                !conn ||
+                conn.status !== "ready" ||
+                String(conn.revision) !== ref.revision ||
+                conn.provider_key !== key
+              )
+                blockers.add("provider_not_ready");
+              if (!policy?.enabledForRealRequests)
+                blockers.add("unverified_provider_policy");
+              const mapKey = ref.id + ":" + col.definition.kind;
+              const existing = providers.get(mapKey);
+              const polls =
+                policy?.execution === "asynchronous"
+                  ? (policy.policy.maxPolls ?? null)
+                  : 0;
+              if (existing) {
+                existing.eligibleRows++;
+                existing.lookupStarts++;
+                if (existing.chargeablePolls !== null && polls !== null)
+                  existing.chargeablePolls += polls;
+                else existing.chargeablePolls = null;
+              } else
+                providers.set(mapKey, {
+                  providerKey: key,
+                  capability:
+                    col.definition.kind === "company"
+                      ? "company"
+                      : col.definition.kind === "ai"
+                        ? "ai"
+                        : "email",
+                  connection: ref,
+                  eligibleRows: 1,
+                  lookupStarts: 1,
+                  chargeablePolls: polls,
+                  cost: { kind: "unknown" },
+                });
+              requiredConsent.unknownPrice = true;
+            }
+          }
+        }
+        const stepId = uid();
+        steps.push({
+          id: stepId,
+          rowId: row.id,
+          columnId: col.id,
+          outcome,
+          reason,
+          sourceStepId: outcome === "reused" ? cell?.sourceStepId : null,
+          value: outcome === "reused" ? cell.value : null,
+          dependencies: columnDependencies(col).filter((cid) =>
+            closure.some((c) => c.id === cid),
+          ),
+        });
+      }
+    }
+    // Eligibility counts are cells, provider eligibleRows deduplicates rows even if provider serves several outputs.
+    const counts = [...providers.values()];
+    for (const p of counts)
+      p.eligibleRows = Math.min(p.eligibleRows, rows.length);
+    if (
+      (
+        await tx.query(
+          "SELECT 1 FROM app.reservations WHERE table_id=$1 AND row_id=ANY($2::uuid[]) AND column_id=ANY($3::uuid[]) LIMIT 1",
+          [input.tableId, rows.map((r) => r.id), closure.map((c) => c.id)],
+        )
+      ).rowCount
+    )
+      blockers.add("active_work");
+    const max = counts.some((p) => p.chargeablePolls === null)
+      ? null
+      : counts.reduce((n, p) => n + p.lookupStarts + p.chargeablePolls, 0);
+    const preview = RunPreviewSchema.parse({
+      id: uid(),
+      revision: "1",
+      tableId: input.tableId,
+      expectedTableRevision: data.table.revision,
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      inputFingerprint: fingerprint(data, rows, connections),
+      parentRunId: input.parentRunId ?? null,
+      rowIds: rows.map((r) => r.id),
+      selectedColumnIds: input.selectedColumnIds,
+      prerequisiteColumnIds: closure
+        .filter((c) => !input.selectedColumnIds.includes(c.id))
+        .map((c) => c.id),
+      cells: {
+        eligible: steps.filter((s) => s.outcome === "queued").length,
+        reused: steps.filter((s) => s.outcome === "reused").length,
+        skipped: steps.filter((s) => s.outcome === "skipped").length,
+      },
+      providers: counts,
+      maximumExternalRequests: max,
+      requiredConsent,
+      blockers: [...blockers],
+    });
+    const rowSnapshots = rows.map((r) => ({
+      rowId: r.id,
+      values: Object.fromEntries(
+        Object.entries(r.cells).map(([id, c]) => [id, (c as any).value]),
+      ),
+      versions: Object.fromEntries(
+        Object.entries(r.cells).map(([id, c]) => [id, (c as any).version]),
+      ),
+    }));
+    const payload = {
+      preview: { ...preview, skippedDetails, replacements },
+      columns: data.columns,
+      closure: closure.map((c) => c.id),
+      steps,
+      rowSnapshots,
+    };
+    await tx.query(
+      "INSERT INTO app.plans(id,workspace_id,table_id,kind,expires_at,payload) VALUES($1,$2,$3,'run',$4,$5)",
+      [preview.id, ws, input.tableId, preview.expiresAt, payload],
+    );
+    return payload.preview;
+  }
+  async preview(owner: string, input: unknown) {
+    const req = RunPreviewRequestSchema.parse(input);
+    return this.db.transaction(async (tx) =>
+      this.prepareTx(tx, await workspace(tx, owner), req),
+    );
+  }
+  async confirm(owner: string, input: unknown) {
+    const req = RunConfirmRequestSchema.parse(input);
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      const initial = await ownedPlan(tx, ws, req.previewId, "run", false);
+      await ownedTable(tx, ws, initial.table_id, true);
+      const prior = (
+        await tx.query(
+          "SELECT id,table_id,status,request_fingerprint FROM app.runs WHERE workspace_id=$1 AND idempotency_key=$2",
+          [ws, req.idempotencyKey],
+        )
+      ).rows[0];
+      const requestHash = hash(req);
+      if (prior) {
+        if (prior.request_fingerprint !== requestHash)
+          fail("idempotency_conflict");
+        return { id: prior.id, tableId: prior.table_id, status: prior.status };
+      }
+      const p = await ownedPlan(tx, ws, req.previewId, "run");
+      const error = checkRunConfirmation(p.payload.preview, req, new Date());
+      if (error) fail(error.code);
+      const data = await loadTable(tx, ws, p.table_id);
+      const connections = (
+        await tx.query("SELECT * FROM app.connections WHERE workspace_id=$1", [
+          ws,
+        ])
+      ).rows;
+      if (
+        fingerprint(
+          data,
+          data.rows.filter((r) => p.payload.preview.rowIds.includes(r.id)),
+          connections,
+        ) !== p.payload.preview.inputFingerprint
+      )
+        fail("version_conflict");
+      const id = uid();
+      await tx.query(
+        "INSERT INTO app.runs(id,workspace_id,table_id,parent_run_id,status,idempotency_key,request_fingerprint,snapshot) VALUES($1,$2,$3,$4,'queued',$5,$6,$7)",
+        [
+          id,
+          ws,
+          p.table_id,
+          p.payload.preview.parentRunId,
+          req.idempotencyKey,
+          requestHash,
+          {
+            columns: p.payload.columns,
+            closure: p.payload.closure,
+            consent: req.consent,
+          },
+        ],
+      );
+      for (const row of p.payload.rowSnapshots)
+        await tx.query(
+          "INSERT INTO app.run_rows(run_id,table_id,row_id,values,source_versions) VALUES($1,$2,$3,$4,$5)",
+          [id, p.table_id, row.rowId, row.values, row.versions],
+        );
+      for (const step of p.payload.steps) {
+        const deps = p.payload.steps
+          .filter(
+            (s: any) =>
+              s.rowId === step.rowId && step.dependencies.includes(s.columnId),
+          )
+          .map((s: any) => s.id);
+        await tx.query(
+          "INSERT INTO app.steps(id,run_id,table_id,row_id,column_id,prerequisite_ids,outcome,result,reason,source_step_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+          [
+            step.id,
+            id,
+            p.table_id,
+            step.rowId,
+            step.columnId,
+            deps,
+            step.outcome,
+            step.value,
+            step.reason,
+            step.sourceStepId,
+          ],
+        );
+        if (step.outcome === "queued") {
+          if (
+            (
+              await tx.query(
+                "SELECT 1 FROM app.reservations WHERE row_id=$1 AND column_id=$2",
+                [step.rowId, step.columnId],
+              )
+            ).rowCount
+          )
+            fail("active_work");
+          await tx.query(
+            "INSERT INTO app.reservations(row_id,column_id,step_id,table_id) VALUES($1,$2,$3,$4)",
+            [step.rowId, step.columnId, step.id, p.table_id],
+          );
+        }
+      }
+      await finalizeRuns(tx, id);
+      return {
+        id,
+        tableId: p.table_id,
+        status: (
+          await tx.query("SELECT status FROM app.runs WHERE id=$1", [id])
+        ).rows[0].status,
+      };
+    });
+  }
+  async retry(owner: string, id: string, input: any) {
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner),
+        run = (
+          await tx.query(
+            "SELECT * FROM app.runs WHERE id=$1 AND workspace_id=$2",
+            [id, ws],
+          )
+        ).rows[0];
+      if (!run) fail("not_found");
+      const allowed = ["failed", "skipped", "no_result", "canceled", "unknown"];
+      const include = input.includeOutcomes ?? ["failed"];
+      if (
+        !Array.isArray(include) ||
+        !include.length ||
+        include.some((x) => !allowed.includes(x))
+      )
+        fail("invalid_value");
+      const targets = (
+        await tx.query(
+          "SELECT * FROM app.steps WHERE run_id=$1 AND outcome=ANY($2::text[])",
+          [id, include],
+        )
+      ).rows.filter(
+        (s) =>
+          !input.targets ||
+          input.targets.some(
+            (t: any) => t.rowId === s.row_id && t.columnId === s.column_id,
+          ),
+      );
+      if (!targets.length) fail("invalid_value");
+      const data = await loadTable(tx, ws, run.table_id, true);
+      return this.prepareTx(
+        tx,
+        ws,
+        {
+          tableId: run.table_id,
+          expectedTableRevision: data.table.revision,
+          parentRunId: id,
+          rowScope: {
+            kind: "selected",
+            rowIds: [...new Set(targets.map((t) => t.row_id))],
+          },
+          selectedColumnIds: [...new Set(targets.map((t) => t.column_id))],
+        },
+        targets,
+      );
+    });
+  }
+}
+export async function finalizeRuns(tx: Tx, id?: string) {
+  await tx.query(
+    `UPDATE app.runs r SET status=CASE WHEN status='cancel_requested' THEN 'canceled' ELSE 'completed' END,completed_at=now() WHERE status IN('queued','running','cancel_requested')${id ? " AND id=$1" : ""} AND NOT EXISTS(SELECT 1 FROM app.steps s WHERE s.run_id=r.id AND s.outcome IN('queued','running'))`,
+    id ? [id] : [],
+  );
+}
