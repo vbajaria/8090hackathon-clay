@@ -15,18 +15,18 @@ const MappingsSchema = z.array(ImportMappingSchema).min(1).max(LIMITS.columns).s
   if (new Set(sources).size !== sources.length || new Set(destinations).size !== destinations.length) ctx.addIssue({ code: 'custom', message: 'Duplicate source or destination mapping' });
 });
 export const ImportPreviewRequestSchema = z.object({ tableId: IdSchema, uploadId: IdSchema, expectedTableRevision: RevisionSchema, mappings: MappingsSchema }).strict();
-export const ImportIssueSchema = z.object({ rowIndex: CountSchema.nullable(), sourceIndex: CountSchema.nullable(), code: z.enum(['invalid_number', 'invalid_date', 'invalid_boolean', 'invalid_mapping', 'capacity_exceeded', 'malformed_csv']) }).strict();
+export const ImportIssueSchema = z.object({ rowIndex: CountSchema.nullable(), sourceIndex: CountSchema.nullable(), code: z.enum(['invalid_number', 'invalid_date', 'invalid_boolean', 'invalid_mapping', 'capacity_exceeded', 'malformed_csv', 'blank_header', 'duplicate_header']) }).strict();
 export const ImportPlanSchema = z.object({
   id: IdSchema, revision: RevisionSchema, tableId: IdSchema, expectedTableRevision: RevisionSchema,
   sourceFingerprint: FingerprintSchema, expiresAt: TimestampSchema, sourceBytes: CountSchema.max(LIMITS.csvBytes),
-  headers: z.array(NonblankSchema).min(1), mappings: MappingsSchema,
+  headers: z.array(z.string()).min(1), mappings: MappingsSchema,
   existingRows: CountSchema.max(LIMITS.rows), appendedRows: CountSchema.max(LIMITS.rows),
   existingColumns: CountSchema.max(LIMITS.columns), createdColumns: CountSchema.max(LIMITS.columns),
   state: z.enum(['needs_correction', 'ready']), issues: z.array(ImportIssueSchema),
   previewRows: z.array(z.array(z.string())).max(10),
 }).strict().superRefine((plan, ctx) => {
   if (plan.existingRows + plan.appendedRows > LIMITS.rows || plan.existingColumns + plan.createdColumns > LIMITS.columns) ctx.addIssue({ code: 'custom', message: 'Import exceeds capacity' });
-  if (new Set(plan.headers.map(h => h.trim().toLowerCase())).size !== plan.headers.length) ctx.addIssue({ code: 'custom', message: 'Duplicate headers' });
+  if (plan.state === 'ready' && (plan.headers.some(h => !h.trim()) || new Set(plan.headers.map(h => h.trim().toLowerCase())).size !== plan.headers.length)) ctx.addIssue({ code: 'custom', message: 'Duplicate headers' });
   if (plan.mappings.some(m => m.sourceIndex >= plan.headers.length)) ctx.addIssue({ code: 'custom', message: 'Mapping references missing header' });
   if (plan.mappings.filter(m => m.destination.kind === 'new').length !== plan.createdColumns) ctx.addIssue({ code: 'custom', message: 'New column count does not match mappings' });
   if ((plan.state === 'ready') !== (plan.issues.length === 0)) ctx.addIssue({ code: 'custom', message: 'Import readiness must reflect all validation issues' });

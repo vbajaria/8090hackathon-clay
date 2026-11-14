@@ -1,0 +1,153 @@
+import {
+  ProviderCapabilitiesSchema,
+  type ProviderCapabilities,
+} from "@leadwork/contracts";
+import {
+  capabilityCatalog,
+  encryptCredentials,
+  createGateway,
+  type Credentials,
+} from "@leadwork/providers";
+import { Database, fail } from "./db.js";
+import { workspace, uid } from "./tables.js";
+export type Policy = ProviderCapabilities;
+export const connectionDto = (c: any) => ({
+  id: c.id,
+  revision: String(c.revision),
+  providerKey: c.provider_key,
+  status: c.status,
+  capabilities: [
+    c.provider_key === "pdl"
+      ? "company"
+      : c.provider_key === "openai"
+        ? "ai"
+        : "email",
+  ],
+  validatedAt: c.validated_at ? new Date(c.validated_at).toISOString() : null,
+  validationEvidenceId: c.validation_evidence_id,
+});
+export class ConnectionService {
+  constructor(
+    readonly db: Database,
+    readonly key: string,
+    readonly gateway: ReturnType<typeof createGateway>,
+    readonly policies: readonly Policy[] = capabilityCatalog,
+  ) {}
+  async list(owner: string) {
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      return {
+        connections: (
+          await tx.query(
+            "SELECT * FROM app.connections WHERE workspace_id=$1 ORDER BY id",
+            [ws],
+          )
+        ).rows.map(connectionDto),
+        catalog: capabilityCatalog.map((c) => ({
+          ...c,
+          ...this.policies.find((p) => p.providerKey === c.providerKey),
+        })),
+      };
+    });
+  }
+  async create(owner: string, input: any) {
+    if (input.acknowledgeDirectBilling !== true) fail("consent_required");
+    const cat = capabilityCatalog.find(
+      (c) => c.providerKey === input.providerKey,
+    );
+    if (!cat) fail("invalid_value");
+    const credentials: Credentials = input.credentials;
+    if (
+      !credentials ||
+      Object.keys(credentials).some(
+        (k) => !["apiKey", "clientId", "clientSecret"].includes(k),
+      ) ||
+      Object.values(credentials).some(
+        (v) => typeof v !== "string" || !v.trim() || v.length > 4096,
+      )
+    )
+      fail("invalid_value");
+    if (cat.credentialShape === "api_key" && !credentials.apiKey)
+      fail("invalid_value");
+    if (
+      cat.credentialShape === "client_credentials" &&
+      (!credentials.clientId || !credentials.clientSecret)
+    )
+      fail("invalid_value");
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner),
+        id = uid();
+      let ciphertext: string;
+      try {
+        ciphertext = encryptCredentials(
+          credentials,
+          this.key,
+          JSON.stringify([ws, id]),
+        );
+      } catch {
+        fail("provider_not_ready");
+      }
+      const q = await tx.query(
+        "INSERT INTO app.connections(id,workspace_id,provider_key,status,ciphertext) VALUES($1,$2,$3,'unvalidated',$4) RETURNING *",
+        [id, ws, input.providerKey, ciphertext],
+      );
+      return connectionDto(q.rows[0]);
+    });
+  }
+  async disconnect(owner: string, id: string) {
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      const q = await tx.query(
+        "UPDATE app.connections SET status='disconnected',ciphertext='',revision=revision+1,validated_at=NULL,validation_evidence_id=NULL WHERE id=$1 AND workspace_id=$2 RETURNING id",
+        [id, ws],
+      );
+      if (!q.rowCount) fail("not_found");
+    });
+  }
+  async validate(owner: string, id: string) {
+    const stored = await this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      const c = (
+        await tx.query(
+          "SELECT * FROM app.connections WHERE id=$1 AND workspace_id=$2",
+          [id, ws],
+        )
+      ).rows[0];
+      if (!c || c.status === "disconnected") fail("not_found");
+      return { ws, c };
+    });
+    const { decryptCredentials } = await import("@leadwork/providers");
+    let credentials: Credentials;
+    try {
+      credentials = decryptCredentials(
+        stored.c.ciphertext,
+        this.key,
+        JSON.stringify([stored.ws, id]),
+      );
+    } catch {
+      fail("provider_not_ready");
+    }
+    const result = await this.gateway.validate(
+      stored.c.provider_key,
+      credentials!,
+    );
+    return this.db.transaction(async (tx) => {
+      const q = await tx.query(
+        "UPDATE app.connections SET status=$3,validated_at=$4,validation_evidence_id=$5 WHERE id=$1 AND workspace_id=$2 AND revision=$6 AND status<>$7 RETURNING *",
+        [
+          id,
+          stored.ws,
+          result.status,
+          result.status === "ready" ? new Date() : null,
+          result.status === "ready" ? uid() : null,
+          stored.c.revision,
+          "disconnected",
+        ],
+      );
+      if (!q.rowCount) fail("version_conflict");
+      return connectionDto(q.rows[0]);
+    });
+  }
+}
+export const validatePolicies = (policies: unknown[]) =>
+  policies.map((p) => ProviderCapabilitiesSchema.parse(p));

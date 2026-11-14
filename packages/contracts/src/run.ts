@@ -4,7 +4,7 @@ import { ColumnSchema, RowScopeSchema, StepOutcomeSchema } from './table.js';
 
 export const RunStatusSchema = z.enum(['queued', 'running', 'cancel_requested', 'completed', 'canceled']);
 export const ConsentSchema = z.object({ overwritePopulated: z.boolean(), refreshStale: z.boolean(), unknownPrice: z.boolean(), possibleDuplicateCharge: z.boolean() }).strict();
-export const RunPreviewRequestSchema = z.object({ tableId: IdSchema, expectedTableRevision: RevisionSchema, rowScope: RowScopeSchema, selectedColumnIds: uniqueIds().refine(ids => ids.length > 0, 'Choose an output'), parentRunId: IdSchema.optional() }).strict();
+export const RunPreviewRequestSchema = z.object({ tableId: IdSchema, expectedTableRevision: RevisionSchema, rowScope: RowScopeSchema, selectedColumnIds: uniqueIds().refine(ids => ids.length > 0, 'Choose an output'), parentRunId: IdSchema.optional(), replacePopulated: z.boolean().optional() }).strict();
 export const CostEstimateSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('unknown') }).strict(),
   z.object({ kind: z.literal('range'), currency: z.string().regex(/^[A-Z]{3}$/), minimum: z.number().finite().nonnegative(), maximum: z.number().finite().nonnegative() }).strict(),

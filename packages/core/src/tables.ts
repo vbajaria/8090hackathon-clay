@@ -1,0 +1,708 @@
+import { randomUUID } from "node:crypto";
+import { canonicalHash } from "./hash.js";
+import { Decimal } from "decimal.js";
+import {
+  CellPatchSchema,
+  CellValueSchema,
+  ColumnDefinitionSchema,
+  IdSchema,
+  TableViewSchema,
+  apiError,
+  type Column,
+  type CellValue,
+  type RowScope,
+  type TableView,
+} from "@leadwork/contracts";
+import {
+  columnDependencies,
+  evaluateFormula,
+  topologicalColumns,
+  validateColumnConfiguration,
+  parseEditableValue,
+} from "@leadwork/engine";
+import { Database, fail, ServiceError, type Tx } from "./db.js";
+export const uid = () => randomUUID();
+export const valueType = (column: Column): CellValue["type"] =>
+  column.definition.kind === "editable"
+    ? column.definition.valueType
+    : column.definition.kind === "formula"
+      ? column.definition.returnType
+      : "text";
+export const nullValue = (column: Column): CellValue =>
+  ({ type: valueType(column), value: null }) as CellValue;
+export const columnDto = (c: any): Column => ({
+  id: c.id,
+  name: c.name,
+  revision: String(c.revision),
+  definition: c.definition,
+});
+export const tableDto = (t: any) => ({
+  id: t.id,
+  name: t.name,
+  revision: String(t.revision),
+  createdAt: new Date(t.created_at).toISOString(),
+  updatedAt: new Date(t.updated_at).toISOString(),
+  rowCount: t.row_count,
+  columnCount: t.column_count,
+});
+export async function workspace(tx: Tx, ownerId: string) {
+  IdSchema.parse(ownerId);
+  const existing = (
+    await tx.query("SELECT id FROM app.workspaces WHERE owner_id=$1", [ownerId])
+  ).rows[0];
+  if (existing) return existing.id as string;
+  const inserted = await tx.query(
+    "INSERT INTO app.workspaces(id,owner_id) VALUES($1,$2) ON CONFLICT(owner_id) DO NOTHING RETURNING id",
+    [uid(), ownerId],
+  );
+  const result =
+    inserted.rows[0] ??
+    (
+      await tx.query("SELECT id FROM app.workspaces WHERE owner_id=$1", [
+        ownerId,
+      ])
+    ).rows[0];
+  if (!result) fail("version_conflict");
+  return result.id as string;
+}
+export async function ownedTable(tx: Tx, ws: string, id: string, lock = false) {
+  IdSchema.parse(id);
+  const q = await tx.query(
+    `SELECT * FROM app.tables WHERE id=$1 AND workspace_id=$2${lock ? " FOR UPDATE" : ""}`,
+    [id, ws],
+  );
+  if (!q.rowCount) fail("not_found");
+  return q.rows[0];
+}
+export async function loadTable(
+  tx: Tx,
+  ws: string,
+  id: string,
+  lock = false,
+  rowIds?: string[],
+) {
+  const table = await ownedTable(tx, ws, id, lock);
+  const columns = (
+    await tx.query(
+      "SELECT * FROM app.columns WHERE table_id=$1 ORDER BY position,id",
+      [id],
+    )
+  ).rows.map(columnDto);
+  const data = await tx.query(
+    `SELECT r.id,r.sequence,c.column_id,c.value,c.version,c.stale,c.outcome,c.source_step_id FROM app.rows r LEFT JOIN app.cells c ON c.row_id=r.id WHERE r.table_id=$1${rowIds ? " AND r.id=ANY($2::uuid[])" : ""} ORDER BY r.sequence,r.id`,
+    [id, ...(rowIds ? [rowIds] : [])],
+  );
+  const rows: any[] = [];
+  const map = new Map<string, any>();
+  for (const c of data.rows) {
+    let row = map.get(c.id);
+    if (!row) {
+      row = { id: c.id, insertionSequence: String(c.sequence), cells: {} };
+      map.set(c.id, row);
+      rows.push(row);
+    }
+    if (c.column_id)
+      row.cells[c.column_id] = {
+        value: c.value,
+        version: String(c.version),
+        stale: c.stale,
+        outcome: c.outcome,
+        sourceStepId: c.source_step_id,
+      };
+  }
+  const viewRow = (
+    await tx.query("SELECT * FROM app.views WHERE table_id=$1", [id])
+  ).rows[0];
+  const view: TableView = {
+    ...viewRow.definition,
+    revision: String(viewRow.revision),
+  };
+  return { table: tableDto(table), columns, rows, view };
+}
+export function filterRows(
+  rows: any[],
+  view: Pick<TableView, "filters" | "sort">,
+) {
+  const cmp = (a: CellValue, b: CellValue) =>
+    a.type === "number" && b.type === "number"
+      ? new Decimal(a.value ?? "0").cmp(new Decimal(b.value ?? "0"))
+      : String(a.value).localeCompare(String(b.value));
+  let result = rows.filter((r) =>
+    view.filters.every((f) => {
+      const v: CellValue | undefined = r.cells[f.columnId]?.value;
+      const blank = !v || v.value === null || v.value === "";
+      if (f.operator === "is_blank") return blank;
+      if (f.operator === "is_not_blank") return !blank;
+      if (blank) return false;
+      if (f.operator === "contains")
+        return v?.type === "text" && String(v.value).includes(f.value);
+      if (v?.type !== f.value.type) return false;
+      const comparison = cmp(v, f.value);
+      return f.operator === "equals"
+        ? comparison === 0
+        : f.operator === "not_equals"
+          ? comparison !== 0
+          : f.operator === "greater_than"
+            ? comparison > 0
+            : comparison < 0;
+    }),
+  );
+  result = [...result].sort((a, b) => {
+    for (const sort of view.sort) {
+      const av: CellValue | undefined = a.cells[sort.columnId]?.value,
+        bv: CellValue | undefined = b.cells[sort.columnId]?.value;
+      const ab = !av || av.value === null || av.value === "",
+        bb = !bv || bv.value === null || bv.value === "";
+      if (ab !== bb) return ab ? 1 : -1;
+      if (!ab && !bb) {
+        const c = cmp(av!, bv!);
+        if (c) return c * (sort.direction === "asc" ? 1 : -1);
+      }
+    }
+    return BigInt(a.insertionSequence) < BigInt(b.insertionSequence)
+      ? -1
+      : BigInt(a.insertionSequence) > BigInt(b.insertionSequence)
+        ? 1
+        : a.id.localeCompare(b.id);
+  });
+  return result;
+}
+export function scopeRows(
+  data: Awaited<ReturnType<typeof loadTable>>,
+  scope: RowScope,
+) {
+  if (scope.kind === "all") return data.rows;
+  if (scope.kind === "selected") {
+    const selected = new Set(scope.rowIds);
+    const rows = data.rows.filter((r) => selected.has(r.id));
+    if (rows.length !== selected.size) fail("not_found");
+    return rows;
+  }
+  if (scope.viewRevision !== data.view.revision) fail("version_conflict");
+  return filterRows(data.rows, {
+    filters: scope.filters,
+    sort: data.view.sort,
+  });
+}
+export async function touch(tx: Tx, id: string) {
+  await tx.query(
+    "UPDATE app.tables SET revision=revision+1,updated_at=now() WHERE id=$1",
+    [id],
+  );
+}
+export async function insertRows(
+  tx: Tx,
+  tableId: string,
+  columns: Column[],
+  values: Record<string, CellValue>[],
+) {
+  const ids = values.map(() => uid());
+  if (!ids.length) return [];
+  await tx.query(
+    "INSERT INTO app.rows(id,table_id) SELECT unnest($1::uuid[]),$2::uuid",
+    [ids, tableId],
+  );
+  const cells = ids.flatMap((rowId, i) =>
+    columns.map((c) => ({
+      row_id: rowId,
+      column_id: c.id,
+      value: values[i][c.id] ?? nullValue(c),
+    })),
+  );
+  await tx.query(
+    "INSERT INTO app.cells(row_id,column_id,table_id,value) SELECT row_id,column_id,$2::uuid,value FROM jsonb_to_recordset($1::jsonb) AS x(row_id uuid,column_id uuid,value jsonb)",
+    [JSON.stringify(cells), tableId],
+  );
+  return ids;
+}
+export async function recalculate(
+  tx: Tx,
+  tableId: string,
+  columns: Column[],
+  rowIds?: string[],
+) {
+  const formulas = topologicalColumns(
+    columns,
+    columns.filter((c) => c.definition.kind === "formula").map((c) => c.id),
+  );
+  if (!formulas.length) return;
+  const ws = (
+    await tx.query("SELECT workspace_id FROM app.tables WHERE id=$1", [tableId])
+  ).rows[0]?.workspace_id;
+  if (!ws) return;
+  const data = await loadTable(tx, ws, tableId, false, rowIds);
+  for (const row of data.rows) {
+    if (rowIds && !rowIds.includes(row.id)) continue;
+    const values: Record<string, CellValue> = Object.fromEntries(
+      Object.entries(row.cells).map(([k, v]) => [k, (v as any).value]),
+    );
+    for (const col of formulas) {
+      if (col.definition.kind !== "formula") continue;
+      try {
+        if (
+          columnDependencies(col).some(
+            (id) =>
+              columns.find((c) => c.id === id)?.definition.kind !==
+                "editable" &&
+              (row.cells[id]?.stale ||
+                !["succeeded", "reused"].includes(row.cells[id]?.outcome)),
+          )
+        )
+          throw Error("unavailable");
+        const value = evaluateFormula(col.definition.expression, values);
+        if (value.type !== col.definition.returnType && value.value !== null)
+          throw Error("type");
+        const typed = { type: col.definition.returnType, value: value.value };
+        values[col.id] = typed as CellValue;
+        row.cells[col.id] = {
+          ...row.cells[col.id],
+          value: typed,
+          stale: false,
+          outcome: "succeeded",
+        };
+        await tx.query(
+          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='succeeded',stale=false,source_step_id=NULL WHERE row_id=$1 AND column_id=$2",
+          [row.id, col.id, JSON.stringify(typed)],
+        );
+      } catch {
+        values[col.id] = nullValue(col);
+        row.cells[col.id] = {
+          ...row.cells[col.id],
+          value: nullValue(col),
+          stale: true,
+          outcome: "failed",
+        };
+        await tx.query(
+          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='failed',stale=true,source_step_id=NULL WHERE row_id=$1 AND column_id=$2",
+          [row.id, col.id, JSON.stringify(nullValue(col))],
+        );
+      }
+    }
+  }
+}
+export async function staleDependents(
+  tx: Tx,
+  tableId: string,
+  columns: Column[],
+  changed: string,
+  rowId?: string,
+) {
+  const affected = new Set([changed]);
+  let repeat = true;
+  while (repeat) {
+    repeat = false;
+    for (const col of columns)
+      if (
+        !affected.has(col.id) &&
+        columnDependencies(col).some((id) => affected.has(id))
+      ) {
+        affected.add(col.id);
+        repeat = true;
+      }
+  }
+  affected.delete(changed);
+  if (affected.size)
+    await tx.query(
+      `UPDATE app.cells SET stale=true WHERE table_id=$1 AND column_id=ANY($2::uuid[])${rowId ? " AND row_id=$3" : ""}`,
+      [tableId, [...affected], ...(rowId ? [rowId] : [])],
+    );
+}
+export class TableService {
+  constructor(readonly db: Database) {}
+  async list(owner: string) {
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      return (
+        await tx.query(
+          "SELECT * FROM app.tables WHERE workspace_id=$1 ORDER BY updated_at DESC,id",
+          [ws],
+        )
+      ).rows.map(tableDto);
+    });
+  }
+  async create(owner: string, name: string) {
+    if (typeof name !== "string" || !name.trim()) fail("invalid_value");
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner),
+        id = uid();
+      await tx.query(
+        "INSERT INTO app.tables(id,workspace_id,name) VALUES($1,$2,$3)",
+        [id, ws, name.trim()],
+      );
+      const columns = [
+        "Person name",
+        "Company name",
+        "Company domain",
+        "Email address",
+      ].map((name, i) => ({
+        id: uid(),
+        name,
+        revision: "1",
+        position: i,
+        definition: { kind: "editable", valueType: "text" },
+      }));
+      for (const c of columns)
+        await tx.query(
+          "INSERT INTO app.columns(id,table_id,name,position,definition) VALUES($1,$2,$3,$4,$5)",
+          [c.id, id, c.name, c.position, c.definition],
+        );
+      await tx.query(
+        "INSERT INTO app.views(table_id,definition) VALUES($1,$2)",
+        [
+          id,
+          { filters: [], sort: [], visibleColumnIds: columns.map((c) => c.id) },
+        ],
+      );
+      return tableDto(await ownedTable(tx, ws, id));
+    });
+  }
+  async read(owner: string, id: string, cursor?: string, limit = 100) {
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id);
+      const rows = filterRows(data.rows, data.view);
+      let start = 0;
+      if (cursor) {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(Buffer.from(cursor, "base64url").toString());
+        } catch {
+          fail("invalid_value");
+        }
+        if (
+          parsed.tableId !== id ||
+          parsed.revision !== data.table.revision ||
+          parsed.viewRevision !== data.view.revision
+        )
+          fail("version_conflict");
+        start = rows.findIndex((r) => r.id === parsed.rowId) + 1;
+        if (!start) fail("invalid_value");
+      }
+      const bounded = Math.min(250, Math.max(1, limit));
+      const page = rows.slice(start, start + bounded);
+      return {
+        ...data,
+        rows: page,
+        nextCursor:
+          start + bounded < rows.length
+            ? Buffer.from(
+                JSON.stringify({
+                  tableId: id,
+                  revision: data.table.revision,
+                  viewRevision: data.view.revision,
+                  rowId: page.at(-1).id,
+                }),
+              ).toString("base64url")
+            : null,
+      };
+    });
+  }
+  async addRow(owner: string, id: string) {
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id, true);
+      if (data.table.rowCount >= 5000) fail("capacity_exceeded");
+      const [rowId] = await insertRows(tx, id, data.columns, [{}]);
+      await recalculate(tx, id, data.columns, [rowId]);
+      await touch(tx, id);
+      return (await loadTable(tx, await workspace(tx, owner), id)).rows.find(
+        (r) => r.id === rowId,
+      );
+    });
+  }
+  async patch(owner: string, id: string, input: unknown) {
+    const patch = CellPatchSchema.parse(input);
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id, true),
+        col = data.columns.find((c) => c.id === patch.columnId),
+        row = data.rows.find((r) => r.id === patch.rowId);
+      if (!col || !row) fail("not_found");
+      if (
+        col.definition.kind !== "editable" ||
+        patch.value.type !== col.definition.valueType
+      )
+        fail("invalid_value");
+      const current = row.cells[col.id];
+      if (current.version !== patch.expectedVersion)
+        throw new ServiceError(apiError("version_conflict"), { current });
+      await tx.query(
+        "UPDATE app.cells SET value=$3,version=version+1 WHERE row_id=$1 AND column_id=$2",
+        [row.id, col.id, patch.value],
+      );
+      await staleDependents(tx, id, data.columns, col.id, row.id);
+      await recalculate(tx, id, data.columns, [row.id]);
+      await touch(tx, id);
+      return (await loadTable(tx, await workspace(tx, owner), id)).rows.find(
+        (r) => r.id === row.id,
+      ).cells[col.id];
+    });
+  }
+  async saveColumn(owner: string, id: string, input: any, columnId?: string) {
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id, true);
+      const old = columnId
+        ? data.columns.find((c) => c.id === columnId)
+        : undefined;
+      if (columnId && !old) fail("not_found");
+      if (old && old.revision !== input.expectedRevision)
+        fail("version_conflict");
+      if (!old && data.columns.length >= 50) fail("capacity_exceeded");
+      const definition = ColumnDefinitionSchema.parse(
+        input.definition ??
+          old?.definition ?? { kind: "editable", valueType: "text" },
+      );
+      const name = (input.name ?? old?.name)?.trim();
+      if (!name) fail("invalid_value");
+      const candidate: Column = {
+        id: old?.id ?? uid(),
+        name,
+        revision: old ? String(BigInt(old.revision) + 1n) : "1",
+        definition,
+      };
+      const columns = old
+        ? data.columns.map((c) => (c.id === old.id ? candidate : c))
+        : [...data.columns, candidate];
+      validateColumnConfiguration(columns);
+      if (old && valueType(old) !== valueType(candidate)) {
+        if (
+          (
+            await tx.query(
+              "SELECT 1 FROM app.reservations WHERE column_id=$1 LIMIT 1",
+              [old.id],
+            )
+          ).rowCount
+        )
+          fail("active_work");
+        for (const row of data.rows) {
+          const value = row.cells[old.id]?.value;
+          if (
+            value?.value !== null &&
+            value?.value !== undefined &&
+            value.type !== valueType(candidate)
+          ) {
+            try {
+              parseEditableValue(valueType(candidate), String(value.value));
+            } catch {
+              fail("invalid_value");
+            }
+          }
+        }
+      }
+      const refs: any[] = [];
+      if (definition.kind === "company" || definition.kind === "ai")
+        refs.push({
+          ref: definition.connection,
+          key: definition.kind === "company" ? "pdl" : "openai",
+        });
+      if (definition.kind === "email")
+        refs.push(
+          ...definition.providers.map((p) => ({
+            ref: p.connection,
+            key: p.providerKey,
+          })),
+        );
+      const ws = await workspace(tx, owner);
+      for (const { ref, key } of refs) {
+        const c = (
+          await tx.query(
+            "SELECT * FROM app.connections WHERE id=$1 AND workspace_id=$2",
+            [ref.id, ws],
+          )
+        ).rows[0];
+        if (!c || c.provider_key !== key || String(c.revision) !== ref.revision)
+          fail("provider_not_ready");
+      }
+      if (old) {
+        await tx.query(
+          "UPDATE app.columns SET name=$2,definition=$3,revision=revision+1 WHERE id=$1",
+          [old.id, name, definition],
+        );
+        if (valueType(old) !== valueType(candidate)) {
+          for (const row of data.rows) {
+            const v = row.cells[old.id]?.value;
+            const converted =
+              v?.value === null
+                ? nullValue(candidate)
+                : parseEditableValue(
+                    valueType(candidate),
+                    String(v?.value ?? ""),
+                  );
+            await tx.query(
+              "UPDATE app.cells SET value=$3,version=version+1 WHERE row_id=$1 AND column_id=$2",
+              [row.id, old.id, converted],
+            );
+          }
+        }
+        if (JSON.stringify(old.definition) !== JSON.stringify(definition)) {
+          await tx.query(
+            "UPDATE app.cells SET stale=true WHERE column_id=$1 AND outcome IS NOT NULL",
+            [old.id],
+          );
+          await staleDependents(tx, id, columns, old.id);
+        }
+      } else {
+        await tx.query(
+          "INSERT INTO app.columns(id,table_id,name,position,definition) VALUES($1,$2,$3,$4,$5)",
+          [candidate.id, id, name, columns.length - 1, definition],
+        );
+        await tx.query(
+          "INSERT INTO app.cells(row_id,column_id,table_id,value) SELECT id,$2,$1,$3 FROM app.rows WHERE table_id=$1",
+          [id, candidate.id, nullValue(candidate)],
+        );
+        await tx.query(
+          "UPDATE app.views SET definition=jsonb_set(definition,'{visibleColumnIds}',(definition->'visibleColumnIds')||to_jsonb($2::text)),revision=revision+1 WHERE table_id=$1",
+          [id, candidate.id],
+        );
+      }
+      await recalculate(tx, id, columns);
+      await touch(tx, id);
+      return candidate;
+    });
+  }
+  async deleteColumn(
+    owner: string,
+    id: string,
+    columnId: string,
+    revision: string,
+  ) {
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id, true),
+        col = data.columns.find((c) => c.id === columnId);
+      if (!col) fail("not_found");
+      if (col.revision !== revision) fail("version_conflict");
+      const dependent = data.columns.filter((c) =>
+        columnDependencies(c).includes(columnId),
+      );
+      if (dependent.length)
+        fail("invalid_value", {
+          dependentColumnIds: dependent.map((c) => c.id),
+        });
+      if (
+        (
+          await tx.query("SELECT 1 FROM app.reservations WHERE column_id=$1", [
+            columnId,
+          ])
+        ).rowCount
+      )
+        fail("active_work");
+      await tx.query("DELETE FROM app.columns WHERE id=$1", [columnId]);
+      const view = {
+        ...data.view,
+        filters: data.view.filters.filter((f) => f.columnId !== columnId),
+        sort: data.view.sort.filter((s) => s.columnId !== columnId),
+        visibleColumnIds: data.view.visibleColumnIds.filter(
+          (c) => c !== columnId,
+        ),
+      };
+      await tx.query(
+        "UPDATE app.views SET definition=$2,revision=revision+1 WHERE table_id=$1",
+        [id, view],
+      );
+      await touch(tx, id);
+    });
+  }
+  async saveView(owner: string, id: string, input: unknown) {
+    const view = TableViewSchema.parse(input);
+    return this.db.transaction(async (tx) => {
+      const data = await loadTable(tx, await workspace(tx, owner), id, true);
+      if (data.view.revision !== view.revision) fail("version_conflict");
+      const refs = [
+        ...view.visibleColumnIds,
+        ...view.filters.map((f) => f.columnId),
+        ...view.sort.map((s) => s.columnId),
+      ];
+      if (refs.some((cid) => !data.columns.some((c) => c.id === cid)))
+        fail("invalid_value");
+      for (const f of view.filters) {
+        const col = data.columns.find((c) => c.id === f.columnId)!;
+        if (
+          "value" in f &&
+          typeof f.value === "object" &&
+          f.value.type !== valueType(col)
+        )
+          fail("invalid_value");
+        if (f.operator === "contains" && valueType(col) !== "text")
+          fail("invalid_value");
+      }
+      const q = await tx.query(
+        "UPDATE app.views SET definition=$2,revision=revision+1 WHERE table_id=$1 RETURNING revision",
+        [id, view],
+      );
+      return { ...view, revision: String(q.rows[0].revision) };
+    });
+  }
+  async remove(owner: string, id: string, rowIds?: string[]) {
+    return this.db.transaction(async (tx) => {
+      const ws = await workspace(tx, owner);
+      await ownedTable(tx, ws, id, true);
+      if (rowIds) for (const rid of rowIds) IdSchema.parse(rid);
+      const active = await tx.query(
+        `SELECT 1 FROM app.reservations WHERE table_id=$1${rowIds ? " AND row_id=ANY($2::uuid[])" : ""} LIMIT 1`,
+        [id, ...(rowIds ? [rowIds] : [])],
+      );
+      if (active.rowCount) fail("active_work");
+      if (rowIds) {
+        await tx.query("DELETE FROM app.plans WHERE table_id=$1", [id]);
+        await tx.query(
+          "DELETE FROM app.rows WHERE table_id=$1 AND id=ANY($2::uuid[])",
+          [id, rowIds],
+        );
+        await touch(tx, id);
+      } else await tx.query("DELETE FROM app.tables WHERE id=$1", [id]);
+    });
+  }
+  async copyDraft(owner: string, id: string, input: any) {
+    const data = await this.db.transaction(async (tx) =>
+      loadTable(tx, await workspace(tx, owner), id),
+    );
+    const row = data.rows.find((r) => r.id === input.rowId),
+      source = data.columns.find((c) => c.id === input.sourceColumnId),
+      dest = data.columns.find((c) => c.id === input.destinationColumnId);
+    if (
+      !row ||
+      source?.definition.kind !== "ai" ||
+      dest?.definition.kind !== "editable" ||
+      dest.definition.valueType !== "text"
+    )
+      fail("invalid_value");
+    const target = row.cells[dest.id];
+    if (
+      target.value.value !== null &&
+      target.value.value !== "" &&
+      !input.overwrite
+    )
+      fail("consent_required");
+    return this.patch(owner, id, {
+      rowId: row.id,
+      columnId: dest.id,
+      expectedVersion: input.expectedVersion,
+      value: row.cells[source.id].value,
+    });
+  }
+}
+
+// Capture actual direct computed inputs plus transitive settings and editable source versions.
+export function inputSignature(
+  columns: Column[],
+  columnId: string,
+  values: Record<string, CellValue>,
+  versions: Record<string, string>,
+) {
+  const ids = new Set<string>();
+  const leafIds = new Set<string>();
+  const visit = (id: string) => {
+    if (ids.has(id)) return;
+    ids.add(id);
+    const c = columns.find((c) => c.id === id);
+    if (c?.definition.kind === "editable") leafIds.add(id);
+    else if (c) columnDependencies(c).forEach(visit);
+  };
+  visit(columnId);
+  const col = columns.find((c) => c.id === columnId);
+  const direct = col ? columnDependencies(col) : [];
+  return canonicalHash({
+    configs: [...ids]
+      .sort()
+      .map((id) => [id, columns.find((c) => c.id === id)?.definition ?? null]),
+    sourceVersions: [...leafIds].sort().map((id) => [id, versions[id] ?? null]),
+    directInputs: [...direct].sort().map((id) => [id, values[id] ?? null]),
+  });
+}

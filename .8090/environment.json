@@ -1,0 +1,20 @@
+{
+  "name": "Leadwork local web + worker (Node 22 / PostgreSQL 15)",
+  "build": { "dockerfile": ".8090/Dockerfile" },
+  "install": "pnpm install --frozen-lockfile",
+  "start": "pnpm build:packages && node scripts/workspace-setup.mjs",
+  "terminals": [
+    {
+      "name": "postgres",
+      "command": "sudo -n runuser -u postgres -- /usr/lib/postgresql/15/bin/postgres -D /var/lib/postgresql/15/main -c config_file=/etc/postgresql/15/main/postgresql.conf"
+    },
+    {
+      "name": "web",
+      "command": "node scripts/wait-database.mjs && pnpm dev"
+    },
+    {
+      "name": "worker",
+      "command": "node scripts/wait-database.mjs && pnpm worker"
+    }
+  ]
+}
