@@ -102,7 +102,8 @@ pnpm db:migrate
 pnpm test
 ```
 
-GitHub Actions uses Node 22, pnpm 9.15.0, frozen-lockfile installation and a
+GitHub Actions pins Ubuntu 24.04 (supported by the pinned Chromium harness),
+Node 22, pnpm 9.15.0, frozen-lockfile installation and a
 PostgreSQL 15 service. It builds web/worker, typechecks, migrates, and executes
 root `pnpm test`, including **real core SQL fixture tests**, not just mocked unit
 tests. Keys are generated per job; no Supabase/provider/cloud credentials are
