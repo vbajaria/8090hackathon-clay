@@ -1,6 +1,6 @@
 # @leadwork/web — WO-12 / WO-13 / WO-14 / WO-15
 
-Production Next.js App Router client. Only `apps/web/**` excluding `app/api/**` is UI-owned. The shared working branch is `8090/wo-2-complete-mvp-6afd80`; the parent owns the catch-all server bridge, durable persistence, root dependency install/lockfile and E2E. No new server, root manifest changes, PR or work-order status changes were made by this task.
+Production Next.js App Router client. Only `apps/web/**` excluding `app/api/**` is UI-owned. The shared working branch is `8090/wo-2-complete-mvp-6afd80`; the parent owns the catch-all server bridge, durable persistence, root dependency install/lockfile and E2E. No new server or root manifest changes were made by this task. Repository instructions require a draft review handoff and In review statuses; the draft is not a claim that the parent backend/E2E integration is complete.
 
 ## Dependencies / integration
 
