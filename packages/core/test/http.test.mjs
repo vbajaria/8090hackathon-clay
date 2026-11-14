@@ -371,3 +371,10 @@ test('concurrent progress and usage polling are read-only and do not exhaust the
   const results=await Promise.all(requests);assert.ok(results.every(r=>r.status===200));
   const after=(await db.pool.query('SELECT xmin::text AS version FROM app.workspaces WHERE owner_id=$1',[owner])).rows[0].version;assert.equal(after,before);
 });
+
+test('historical reused results stay stale after later automatic formula recomputation', async t => {
+  const f=await fixture(t);const source=(await f.data()).columns[0];const row=await addRow(f);await patch(f,row.id,source.id,text('Before'));
+  const output=await column(f,'Historical formula',{kind:'formula',expression:`UPPER({{${source.id}}})`,referencedColumnIds:[source.id],returnType:'text'});
+  const p=await preview(f,output.id);const run=await f.ok('/runs/confirm',{method:'POST',cookie:f.a.cookie,body:runRequest(p)});
+  await patch(f,row.id,source.id,text('After'));const detail=await f.ok(`/runs/${run.id}`,{cookie:f.a.cookie});assert.equal(detail.results[0].storedValue.value,'BEFORE');assert.equal(detail.results[0].stale,true);
+});

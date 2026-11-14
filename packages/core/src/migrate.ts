@@ -10,6 +10,7 @@ export async function migrate(db: Database) {
       "001_initial",
       "002_run_rows",
       "003_request_authorizations",
+      "004_step_freshness",
     ]) {
       const exists = await tx.query(
         "SELECT name FROM public.leadwork_migrations WHERE name=$1",

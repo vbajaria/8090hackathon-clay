@@ -307,3 +307,12 @@ test('cancel after async authorization but during poll wait must not issue a new
   assert.equal(d.progress.status,'canceled');assert.equal(outcome(d,f.output).outcome,'unknown');assert.equal(f.calls.length,1);
   assert.equal(f.polls.length,0,'REGRESSION: poll issued after cancellation committed during the authorization-to-poll wait');
 });
+
+test('refreshing an upstream result recomputes fresh downstream formulas instead of reusing old values', async t => {
+  let count=0;const f=await company(t,(key,input)=>key==='pdl'?success(key,'company',++count===1?'First Company':'Second Company'):success(key,'ai',input.resolvedInstructions));
+  const formula=await f.column('Reactive company',{kind:'formula',expression:`UPPER(${ref(f.output.id)})`,referencedColumnIds:[f.output.id],returnType:'text'});
+  const ai=await f.column('Chained draft',{kind:'ai',connection:await f.connect('openai'),model:'fixture-model',instructionTemplate:ref(formula.id),referencedColumnIds:[formula.id]});
+  await f.drain((await f.confirm([f.output.id])).id);assert.equal((await f.data()).rows[0].cells[formula.id].value.value,'FIRST COMPANY');
+  const p=await f.planner.preview(f.owner,{tableId:f.table.id,expectedTableRevision:(await f.data()).table.revision,rowScope:{kind:'all'},selectedColumnIds:[f.output.id,ai.id],replacePopulated:true});
+  assert.deepEqual(p.cells,{eligible:3,reused:0,skipped:0});const run=await f.planner.confirm(f.owner,request(p));const d=await f.drain(run.id);assert.equal(outcome(d,ai).storedValue.value,'SECOND COMPANY');
+});

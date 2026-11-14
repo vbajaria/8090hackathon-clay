@@ -23,6 +23,8 @@ import {
   staleDependents,
   touch,
   nullValue,
+  recalculate,
+  inputSignature,
 } from "./tables.js";
 import { finalizeRuns, inputIssue, inputText, refs } from "./planner.js";
 import { recordObservationTx } from "./ledger.js";
@@ -145,9 +147,15 @@ export class Worker {
         );
         return null;
       }
+      const inputFingerprint = inputSignature(
+        run.snapshot.columns,
+        s.column_id,
+        values,
+        frozen.source_versions,
+      );
       await tx.query(
-        "UPDATE app.steps SET outcome='running',fencing=fencing+1,lease_until=now()+($2::int * interval '1 millisecond') WHERE id=$1",
-        [s.id, this.leaseMs],
+        "UPDATE app.steps SET outcome='running',fencing=fencing+1,lease_until=now()+($2::int * interval '1 millisecond'),input_fingerprint=$3 WHERE id=$1",
+        [s.id, this.leaseMs, inputFingerprint],
       );
       await tx.query("UPDATE app.runs SET status='running' WHERE id=$1", [
         run.id,
@@ -157,7 +165,11 @@ export class Worker {
         [s.row_id, s.column_id],
       );
       return {
-        step: { ...s, fencing: String(BigInt(s.fencing) + 1n) },
+        step: {
+          ...s,
+          fencing: String(BigInt(s.fencing) + 1n),
+          input_fingerprint: inputFingerprint,
+        },
         run,
         col,
         values,
@@ -222,46 +234,42 @@ export class Worker {
         String(s.fencing) !== job.step.fencing
       )
         return;
-      const data = await loadTable(tx, run.workspace_id, run.table_id);
+      const data = await loadTable(tx, run.workspace_id, run.table_id, false, [
+        s.row_id,
+      ]);
       const live = data.rows.find((r) => r.id === s.row_id);
-      let stale = false;
-      const seen = new Set<string>();
-      const compare = (id: string) => {
-        if (seen.has(id)) return;
-        seen.add(id);
-        const frozen: Column = job.run.snapshot.columns.find(
-            (c: Column) => c.id === id,
+      const stale =
+        inputSignature(
+          data.columns,
+          s.column_id,
+          Object.fromEntries(
+            Object.entries(live?.cells ?? {}).map(([id, c]) => [
+              id,
+              (c as any).value,
+            ]),
           ),
-          current = data.columns.find((c) => c.id === id);
-        if (
-          !frozen ||
-          !current ||
-          JSON.stringify(frozen.definition) !==
-            JSON.stringify(current.definition)
-        ) {
-          stale = true;
-          return;
-        }
-        if (frozen.definition.kind === "editable") {
-          if (live?.cells[id]?.version !== job.frozen.source_versions[id])
-            stale = true;
-        } else columnDependencies(frozen).forEach(compare);
-      };
-      compare(s.column_id);
+          Object.fromEntries(
+            Object.entries(live?.cells ?? {}).map(([id, c]) => [
+              id,
+              (c as any).version,
+            ]),
+          ),
+        ) !== job.step.input_fingerprint;
       await this.finishTx(tx, s, run, outcome, value, reason, provenance);
       if (outcome === "succeeded" && value) {
         await tx.query(
           "UPDATE app.cells SET value=$3,version=version+1,stale=$4,source_step_id=$5 WHERE row_id=$1 AND column_id=$2",
           [s.row_id, s.column_id, value, stale, s.id],
         );
-        await staleDependents(
-          tx,
-          run.table_id,
-          data.columns,
-          s.column_id,
-          s.row_id,
-        );
       }
+      await staleDependents(
+        tx,
+        run.table_id,
+        data.columns,
+        s.column_id,
+        s.row_id,
+      );
+      await recalculate(tx, run.table_id, data.columns, [s.row_id]);
       await touch(tx, run.table_id);
     });
   }

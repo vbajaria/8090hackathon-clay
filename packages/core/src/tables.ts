@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Decimal } from "decimal.js";
 import {
   CellPatchSchema,
@@ -73,7 +73,13 @@ export async function ownedTable(tx: Tx, ws: string, id: string, lock = false) {
   if (!q.rowCount) fail("not_found");
   return q.rows[0];
 }
-export async function loadTable(tx: Tx, ws: string, id: string, lock = false) {
+export async function loadTable(
+  tx: Tx,
+  ws: string,
+  id: string,
+  lock = false,
+  rowIds?: string[],
+) {
   const table = await ownedTable(tx, ws, id, lock);
   const columns = (
     await tx.query(
@@ -82,8 +88,8 @@ export async function loadTable(tx: Tx, ws: string, id: string, lock = false) {
     )
   ).rows.map(columnDto);
   const data = await tx.query(
-    "SELECT r.id,r.sequence,c.column_id,c.value,c.version,c.stale,c.outcome,c.source_step_id FROM app.rows r LEFT JOIN app.cells c ON c.row_id=r.id WHERE r.table_id=$1 ORDER BY r.sequence,r.id",
-    [id],
+    `SELECT r.id,r.sequence,c.column_id,c.value,c.version,c.stale,c.outcome,c.source_step_id FROM app.rows r LEFT JOIN app.cells c ON c.row_id=r.id WHERE r.table_id=$1${rowIds ? " AND r.id=ANY($2::uuid[])" : ""} ORDER BY r.sequence,r.id`,
+    [id, ...(rowIds ? [rowIds] : [])],
   );
   const rows: any[] = [];
   const map = new Map<string, any>();
@@ -223,7 +229,7 @@ export async function recalculate(
     await tx.query("SELECT workspace_id FROM app.tables WHERE id=$1", [tableId])
   ).rows[0]?.workspace_id;
   if (!ws) return;
-  const data = await loadTable(tx, ws, tableId);
+  const data = await loadTable(tx, ws, tableId, false, rowIds);
   for (const row of data.rows) {
     if (rowIds && !rowIds.includes(row.id)) continue;
     const values: Record<string, CellValue> = Object.fromEntries(
@@ -232,19 +238,41 @@ export async function recalculate(
     for (const col of formulas) {
       if (col.definition.kind !== "formula") continue;
       try {
+        if (
+          columnDependencies(col).some(
+            (id) =>
+              columns.find((c) => c.id === id)?.definition.kind !==
+                "editable" &&
+              (row.cells[id]?.stale ||
+                !["succeeded", "reused"].includes(row.cells[id]?.outcome)),
+          )
+        )
+          throw Error("unavailable");
         const value = evaluateFormula(col.definition.expression, values);
         if (value.type !== col.definition.returnType && value.value !== null)
           throw Error("type");
         const typed = { type: col.definition.returnType, value: value.value };
         values[col.id] = typed as CellValue;
+        row.cells[col.id] = {
+          ...row.cells[col.id],
+          value: typed,
+          stale: false,
+          outcome: "succeeded",
+        };
         await tx.query(
-          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='succeeded',stale=false WHERE row_id=$1 AND column_id=$2",
+          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='succeeded',stale=false,source_step_id=NULL WHERE row_id=$1 AND column_id=$2",
           [row.id, col.id, JSON.stringify(typed)],
         );
       } catch {
         values[col.id] = nullValue(col);
+        row.cells[col.id] = {
+          ...row.cells[col.id],
+          value: nullValue(col),
+          stale: true,
+          outcome: "failed",
+        };
         await tx.query(
-          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='failed',stale=true WHERE row_id=$1 AND column_id=$2",
+          "UPDATE app.cells SET value=$3::jsonb,version=version+1,outcome='failed',stale=true,source_step_id=NULL WHERE row_id=$1 AND column_id=$2",
           [row.id, col.id, JSON.stringify(nullValue(col))],
         );
       }
@@ -648,4 +676,41 @@ export class TableService {
       value: row.cells[source.id].value,
     });
   }
+}
+
+// Capture actual direct computed inputs plus transitive settings and editable source versions.
+export function inputSignature(
+  columns: Column[],
+  columnId: string,
+  values: Record<string, CellValue>,
+  versions: Record<string, string>,
+) {
+  const ids = new Set<string>();
+  const leafIds = new Set<string>();
+  const visit = (id: string) => {
+    if (ids.has(id)) return;
+    ids.add(id);
+    const c = columns.find((c) => c.id === id);
+    if (c?.definition.kind === "editable") leafIds.add(id);
+    else if (c) columnDependencies(c).forEach(visit);
+  };
+  visit(columnId);
+  const col = columns.find((c) => c.id === columnId);
+  const direct = col ? columnDependencies(col) : [];
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        configs: [...ids]
+          .sort()
+          .map((id) => [
+            id,
+            columns.find((c) => c.id === id)?.definition ?? null,
+          ]),
+        sourceVersions: [...leafIds]
+          .sort()
+          .map((id) => [id, versions[id] ?? null]),
+        directInputs: [...direct].sort().map((id) => [id, values[id] ?? null]),
+      }),
+    )
+    .digest("hex");
 }

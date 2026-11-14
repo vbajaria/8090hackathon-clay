@@ -4,7 +4,7 @@ import {
   RunResultSchema,
 } from "@leadwork/contracts";
 import { Database, fail } from "./db.js";
-import { workspace, ownedTable } from "./tables.js";
+import { workspace, ownedTable, inputSignature, columnDto } from "./tables.js";
 import { finalizeRuns } from "./planner.js";
 export class RunService {
   constructor(readonly db: Database) {}
@@ -75,7 +75,26 @@ export class RunService {
           [steps.map((s) => s.id)],
         )
       ).rows;
+      const columns = (
+        await tx.query("SELECT * FROM app.columns WHERE table_id=$1", [
+          run.table_id,
+        ])
+      ).rows.map(columnDto);
+      const rowIds = [...new Set(steps.map((s) => s.row_id))];
+      const liveCells = (
+        await tx.query(
+          "SELECT row_id,column_id,value,version FROM app.cells WHERE table_id=$1 AND row_id=ANY($2::uuid[])",
+          [run.table_id, rowIds],
+        )
+      ).rows;
       const results = steps.map((s) => {
+        const row = liveCells.filter((c) => c.row_id === s.row_id);
+        const currentSignature = inputSignature(
+          columns,
+          s.column_id,
+          Object.fromEntries(row.map((c) => [c.column_id, c.value])),
+          Object.fromEntries(row.map((c) => [c.column_id, String(c.version)])),
+        );
         const reasons = new Set([
           "fresh_output",
           "fresh_reuse",
@@ -94,7 +113,10 @@ export class RunService {
             columnId: s.column_id,
             outcome: s.outcome,
             storedValue: s.result,
-            stale: s.stale ?? true,
+            stale:
+              (s.stale ?? true) ||
+              (!!s.input_fingerprint &&
+                s.input_fingerprint !== currentSignature),
             explanation:
               s.outcome === "reused"
                 ? "fresh_reuse"

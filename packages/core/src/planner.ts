@@ -21,6 +21,7 @@ import {
   scopeRows,
   uid,
   nullValue,
+  inputSignature,
 } from "./tables.js";
 import { hash, ownedPlan } from "./transfer.js";
 import type { Policy } from "./connections.js";
@@ -158,6 +159,7 @@ export class Planner {
         Object.entries(row.cells).map(([id, v]) => [id, (v as any).value]),
       );
       const supplied = new Set<string>();
+      const refreshed = new Set<string>();
       const unavailable = new Set<string>();
       const rowSelected = retryTargets
         ? retryTargets
@@ -169,6 +171,9 @@ export class Planner {
       );
       for (const col of closure) {
         const cell = row.cells[col.id];
+        const changedUpstream = columnDependencies(col).some((id) =>
+          refreshed.has(id),
+        );
         let outcome = "queued",
           reason: string | null = null;
         if (!rowClosure.has(col.id)) {
@@ -177,6 +182,7 @@ export class Planner {
         } else if (
           cell &&
           !cell.stale &&
+          !changedUpstream &&
           ["succeeded", "reused"].includes(cell.outcome) &&
           cell.value.value !== null &&
           cell.value.value !== "" &&
@@ -203,7 +209,9 @@ export class Planner {
             skippedDetails.push({ rowId: row.id, columnId: col.id, reason });
           } else {
             supplied.add(col.id);
-            if (cell?.stale) requiredConsent.refreshStale = true;
+            refreshed.add(col.id);
+            if (cell?.stale || changedUpstream)
+              requiredConsent.refreshStale = true;
             if (
               cell?.value.value !== null &&
               cell?.value.value !== undefined &&
@@ -403,7 +411,7 @@ export class Planner {
           )
           .map((s: any) => s.id);
         await tx.query(
-          "INSERT INTO app.steps(id,run_id,table_id,row_id,column_id,prerequisite_ids,outcome,result,reason,source_step_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+          "INSERT INTO app.steps(id,run_id,table_id,row_id,column_id,prerequisite_ids,outcome,result,reason,source_step_id,input_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
           [
             step.id,
             id,
@@ -415,6 +423,18 @@ export class Planner {
             step.value,
             step.reason,
             step.sourceStepId,
+            step.outcome === "reused"
+              ? inputSignature(
+                  p.payload.columns,
+                  step.columnId,
+                  p.payload.rowSnapshots.find(
+                    (r: any) => r.rowId === step.rowId,
+                  ).values,
+                  p.payload.rowSnapshots.find(
+                    (r: any) => r.rowId === step.rowId,
+                  ).versions,
+                )
+              : null,
           ],
         );
         if (step.outcome === "queued") {
