@@ -11,6 +11,9 @@ import {NormalizedProviderResultSchema, ProviderRequestSchema, ProviderCapabilit
 // Fixture evidence ONLY: these flags never certify providers or enable a real gateway.
 const test = (name, fn) => nodeTest(name, {timeout: 15_000}, fn);
 const db = new Database(process.env.DATABASE_URL ?? 'postgresql://leadwork:leadwork-local-only@localhost:5432/leadwork');
+// Apply bounds to every subsequently created pg client, not just one pooled session.
+db.pool.options.statement_timeout=5000;
+db.pool.options.connectionTimeoutMillis=2000;
 const text = value => ({type:'text', value});
 const ref = id => `{{${id}}}`;
 const consent = {overwritePopulated:true, refreshStale:true, unknownPrice:true, possibleDuplicateCharge:true};
@@ -219,7 +222,9 @@ for(const edit of ['input','settings'])test(`${edit} edited in flight marks outp
 });
 
 test('timeout is terminal unknown with no redispatch; manual retry uses latest input and duplicate-charge consent',async t=>{
+  let dispatches=0;
   const f=await company(t,async(key,input,{signal})=>{
+    if(++dispatches>1)return success(key,'company',`Retried ${input.domain}`,zero);
     await new Promise(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',resolve,{once:true});}); return unknown(key);
   });
   const run=await f.confirm([f.output.id]),d=await f.drain(run.id);assert.equal(outcome(d,f.output).outcome,'unknown');
@@ -229,8 +234,11 @@ test('timeout is terminal unknown with no redispatch; manual retry uses latest i
   const req=request(preview);await assert.rejects(f.planner.confirm(f.owner,{...req,consent:{...consent,possibleDuplicateCharge:false}}),code('consent_required'));
   const retry=await f.planner.confirm(f.owner,req); assert.notEqual(retry.id,run.id);
   const snapshot=(await db.pool.query('SELECT values FROM app.run_rows WHERE run_id=$1',[retry.id])).rows[0]; assert.equal(snapshot.values[f.domain.id].value,'retry.example');
-  // Cancel the separately confirmed retry; proving latest input does not require another timeout.
-  await f.runs.cancel(f.owner,retry.id); assert.deepEqual(await f.detail(run.id),d);assert.equal(f.calls.length,1);
+  const retried=await f.drain(retry.id);assert.equal(retried.progress.parentRunId,run.id);
+  assert.equal(outcome(retried,f.output).storedValue.value,'Retried retry.example');assert.equal(f.calls[1].input.domain,'retry.example');assert.equal(f.calls.length,2);
+  const original=await f.detail(run.id);assert.deepEqual(original.progress,d.progress);assert.deepEqual(original.attempts,d.attempts);
+  assert.equal(outcome(original,f.output).outcome,'unknown');assert.equal(outcome(original,f.output).storedValue,null);
+  assert.equal((await db.pool.query('SELECT values FROM app.run_rows WHERE run_id=$1',[run.id])).rows[0].values[f.domain.id].value,'fixture.example');
 });
 
 test('expired unstarted lease requeues safely; recovered dispatch intent is unknown and late response only updates usage',async t=>{
