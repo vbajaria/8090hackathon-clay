@@ -1,0 +1,56 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15-bookworm
+        env:
+          POSTGRES_USER: leadwork
+          POSTGRES_PASSWORD: ci-fixture-only
+          POSTGRES_DB: leadwork_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U leadwork -d leadwork_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://leadwork:ci-fixture-only@localhost:5432/leadwork_ci
+      APP_ORIGIN: http://localhost:3000
+      AUTH_MODE: development
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Generate disposable fixture keys (never production credentials)
+        shell: bash
+        run: |
+          session=$(openssl rand -hex 32)
+          encryption=$(openssl rand -base64 32)
+          echo "::add-mask::$session"
+          echo "::add-mask::$encryption"
+          printf 'SESSION_SECRET=%s\nCREDENTIAL_ENCRYPTION_KEY=%s\n' "$session" "$encryption" >> "$GITHUB_ENV"
+      - run: pnpm install --frozen-lockfile
+      - name: Check finite setup script syntax
+        run: |
+          node --check scripts/workspace-setup.mjs
+          node --check scripts/wait-database.mjs
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm db:migrate
+      - name: Unit and real PostgreSQL core fixture tests (no vendor credentials)
+        run: pnpm test
