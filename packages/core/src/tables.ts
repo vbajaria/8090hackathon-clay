@@ -46,11 +46,23 @@ export const tableDto = (t: any) => ({
 });
 export async function workspace(tx: Tx, ownerId: string) {
   IdSchema.parse(ownerId);
-  const q = await tx.query(
-    "INSERT INTO app.workspaces(id,owner_id) VALUES($1,$2) ON CONFLICT(owner_id) DO UPDATE SET owner_id=excluded.owner_id RETURNING id",
+  const existing = (
+    await tx.query("SELECT id FROM app.workspaces WHERE owner_id=$1", [ownerId])
+  ).rows[0];
+  if (existing) return existing.id as string;
+  const inserted = await tx.query(
+    "INSERT INTO app.workspaces(id,owner_id) VALUES($1,$2) ON CONFLICT(owner_id) DO NOTHING RETURNING id",
     [uid(), ownerId],
   );
-  return q.rows[0].id as string;
+  const result =
+    inserted.rows[0] ??
+    (
+      await tx.query("SELECT id FROM app.workspaces WHERE owner_id=$1", [
+        ownerId,
+      ])
+    ).rows[0];
+  if (!result) fail("version_conflict");
+  return result.id as string;
 }
 export async function ownedTable(tx: Tx, ws: string, id: string, lock = false) {
   IdSchema.parse(id);

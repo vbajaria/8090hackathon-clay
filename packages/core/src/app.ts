@@ -330,16 +330,15 @@ export function createApp(options: AppOptions = {}) {
         else if (path[2] === "retry-preview" && method === "POST")
           result = await planner.retry(owner, id(), body);
         else fail("not_found");
-      } else if (path[0] === "usage" && method === "GET")
-        result = await db.transaction(async (tx) =>
-          usageSummary(
-            db,
-            await workspace(tx, owner),
-            url.searchParams.get("month") ?? undefined,
-            url.searchParams.get("runId") ?? undefined,
-          ),
+      } else if (path[0] === "usage" && method === "GET") {
+        const ws = await db.transaction((tx) => workspace(tx, owner));
+        result = await usageSummary(
+          db,
+          ws,
+          url.searchParams.get("month") ?? undefined,
+          url.searchParams.get("runId") ?? undefined,
         );
-      else fail("not_found");
+      } else fail("not_found");
       return respond(result);
     } catch (error) {
       if (error instanceof ServiceError)

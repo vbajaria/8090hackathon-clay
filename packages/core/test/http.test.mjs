@@ -361,3 +361,13 @@ test('valid JSON with malformed import mapping shapes returns safe 4xx', async t
   }
   assert.deepEqual(failures,[],JSON.stringify(failures,null,2));
 });
+
+test('concurrent progress and usage polling are read-only and do not exhaust the connection pool', async t => {
+  const f=await fixture(t);await addRow(f);const output=await column(f,'Read-only formula',{kind:'formula',expression:'"ready"',referencedColumnIds:[],returnType:'text'});
+  const p=await preview(f,output.id);const run=await f.ok('/runs/confirm',{method:'POST',cookie:f.a.cookie,body:runRequest(p)});
+  const owner=(await f.ok('/auth/session',{cookie:f.a.cookie})).user.id;
+  const before=(await db.pool.query('SELECT xmin::text AS version FROM app.workspaces WHERE owner_id=$1',[owner])).rows[0].version;
+  const requests=Array.from({length:30},(_,i)=>f.http(i%3===0?'/usage':i%3===1?`/runs/${run.id}`:`/runs?tableId=${f.table.id}`,{cookie:f.a.cookie}));
+  const results=await Promise.all(requests);assert.ok(results.every(r=>r.status===200));
+  const after=(await db.pool.query('SELECT xmin::text AS version FROM app.workspaces WHERE owner_id=$1',[owner])).rows[0].version;assert.equal(after,before);
+});

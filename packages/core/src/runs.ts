@@ -105,7 +105,13 @@ export class RunService {
                     : null,
             provenance: s.provenance,
           }),
-          ...(s.source_step_id ? { sourceResultId: s.source_step_id } : {}),
+          ...(s.outcome === "reused"
+            ? {
+                sourceResultId:
+                  s.source_step_id ??
+                  `snapshot:${id}:${s.row_id}:${s.column_id}`,
+              }
+            : {}),
         };
       });
       return {
