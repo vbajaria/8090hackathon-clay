@@ -31,6 +31,9 @@ export default function LeadTable({ id, back }: { id: string; back: () => void }
       const saved = await api<Cell>(`/tables/${id}/cells`, 'PATCH', { rowId: row.id, columnId: col.id, expectedVersion: acceptConflict ? draft.current!.version : draft.version, value });
       setDrafts(d => { const next = { ...d }; delete next[key]; return next; });
       table.setData(prev => prev ? { ...prev, rows: prev.rows.map(r => r.id === row.id ? { ...r, cells: { ...r.cells, [col.id]: saved } } : r) } : prev);
+      // Dependent formulas, freshness, sort/filter membership and cursors change on the server.
+      // Keep other unsaved drafts, but reload the current saved scope from its first page.
+      resetPage();
     } catch (e) {
       const current = e instanceof RequestError ? e.body.current as Cell | undefined : undefined;
       setDrafts(d => ({ ...d, [key]: { ...draft, error: message(e), ...(current ? { current } : {}), uncertain: e instanceof RequestError && (e.code === 'network' || (e.code === 'version_conflict' && !current)) } }));
