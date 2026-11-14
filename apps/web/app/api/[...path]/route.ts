@@ -4,7 +4,11 @@ export const dynamic = "force-dynamic";
 let app: ReturnType<typeof createApp> | undefined;
 async function handle(request: Request) {
   try {
-    return (app ??= createApp()).handle(request);
+    return (app ??= createApp({
+      authOptions: {
+        allowLoopbackForwarding: process.env.NODE_ENV === "development",
+      },
+    })).handle(request);
   } catch {
     return Response.json(
       {

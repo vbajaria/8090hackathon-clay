@@ -13,6 +13,7 @@ export type AuthOptions = {
   sessionSecret?: string;
   nodeEnv?: string;
   appOrigin?: string;
+  allowLoopbackForwarding?: boolean;
 };
 type Mode = "supabase" | "development" | "unconfigured";
 type User = { id: string; email: string };
@@ -170,13 +171,32 @@ export function createAuth(options: AuthOptions = {}) {
         (origin(appOrigin) !== local || !loopback(new URL(appOrigin).hostname))
       )
         return false;
-      // No proxy trust in this local-only mode, including loopback-targeted forwarded headers.
-      return ![
+      // Next injects forwarding metadata even for direct local TCP requests. Only
+      // the explicitly loopback-bound development bridge can permit that exact shape.
+      const forwarded = [
         "forwarded",
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-forwarded-for",
-      ].some((h) => request.headers.has(h));
+        "x-forwarded-port",
+      ];
+      if (!forwarded.some((h) => request.headers.has(h))) return true;
+      if (!options.allowLoopbackForwarding || request.headers.has("forwarded"))
+        return false;
+      const u = new URL(local),
+        h = request.headers;
+      return (
+        (!h.has("x-forwarded-host") || h.get("x-forwarded-host") === u.host) &&
+        (!h.has("x-forwarded-proto") ||
+          h.get("x-forwarded-proto") === u.protocol.slice(0, -1)) &&
+        (!h.has("x-forwarded-port") ||
+          h.get("x-forwarded-port") ===
+            (u.port || (u.protocol === "https:" ? "443" : "80"))) &&
+        (!h.has("x-forwarded-for") ||
+          ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+            h.get("x-forwarded-for")!,
+          ))
+      );
     } catch {
       return false;
     }

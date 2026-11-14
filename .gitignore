@@ -4,3 +4,6 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Next regenerates framework references for dev/build mode.
+apps/web/next-env.d.ts

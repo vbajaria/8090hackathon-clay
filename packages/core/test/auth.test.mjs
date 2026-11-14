@@ -286,3 +286,13 @@ test('secret rotation invalidates development cookies and noncanonical signature
   assert.notEqual(noncanonical,cookie);
   assert.equal((await dev().session(request(undefined,{cookie:noncanonical}))).user,null);
 });
+
+test('explicit loopback-bound Next bridge permits only exact local forwarding metadata', async () => {
+  const a=createAuth({authMode:'development',nodeEnv:'test',sessionSecret:'s'.repeat(32),appOrigin:'http://localhost:3000',allowLoopbackForwarding:true});
+  const headers={'host':'localhost:3000','origin':'http://localhost:3000','x-forwarded-host':'localhost:3000','x-forwarded-proto':'http','x-forwarded-port':'3000','x-forwarded-for':'127.0.0.1'};
+  const local=new Request('http://localhost:3000/api/auth/login',{method:'POST',headers});
+  assert.equal((await a.session(local)).mode,'development');
+  for(const [field,value] of [['x-forwarded-for','203.0.113.1'],['x-forwarded-host','outside.example'],['x-forwarded-proto','https'],['x-forwarded-port','80'],['forwarded','for=127.0.0.1']]) {
+    assert.equal((await a.session(new Request(local.url,{headers:{...headers,[field]:value}}))).mode,'unconfigured');
+  }
+});
