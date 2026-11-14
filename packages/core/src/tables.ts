@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { canonicalHash } from "./hash.js";
 import { Decimal } from "decimal.js";
 import {
   CellPatchSchema,
@@ -697,20 +698,11 @@ export function inputSignature(
   visit(columnId);
   const col = columns.find((c) => c.id === columnId);
   const direct = col ? columnDependencies(col) : [];
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        configs: [...ids]
-          .sort()
-          .map((id) => [
-            id,
-            columns.find((c) => c.id === id)?.definition ?? null,
-          ]),
-        sourceVersions: [...leafIds]
-          .sort()
-          .map((id) => [id, versions[id] ?? null]),
-        directInputs: [...direct].sort().map((id) => [id, values[id] ?? null]),
-      }),
-    )
-    .digest("hex");
+  return canonicalHash({
+    configs: [...ids]
+      .sort()
+      .map((id) => [id, columns.find((c) => c.id === id)?.definition ?? null]),
+    sourceVersions: [...leafIds].sort().map((id) => [id, versions[id] ?? null]),
+    directInputs: [...direct].sort().map((id) => [id, values[id] ?? null]),
+  });
 }

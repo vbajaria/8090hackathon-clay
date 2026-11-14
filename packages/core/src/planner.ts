@@ -23,6 +23,7 @@ import {
   nullValue,
   inputSignature,
 } from "./tables.js";
+import { canonicalHash } from "./hash.js";
 import { hash, ownedPlan } from "./transfer.js";
 import type { Policy } from "./connections.js";
 export const refs = (c: Column) =>
@@ -40,15 +41,17 @@ export const refs = (c: Column) =>
         }))
       : [];
 export function fingerprint(data: any, rows: any[], connections: any[]) {
-  return hash({
+  return canonicalHash({
     table: data.table.revision,
     columns: data.columns,
     rows: rows.map((r) => ({ id: r.id, cells: r.cells })),
-    connections: connections.map((c) => ({
-      id: c.id,
-      revision: String(c.revision),
-      status: c.status,
-    })),
+    connections: [...connections]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((c) => ({
+        id: c.id,
+        revision: String(c.revision),
+        status: c.status,
+      })),
     view: data.view.revision,
   });
 }

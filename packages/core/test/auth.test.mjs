@@ -39,14 +39,14 @@ function supabaseFixture(t,{otpError=false,exchangeError=false,userError=false,l
     if (url.pathname === '/auth/v1/logout') return logoutError ? failure() : new Response(null,{status:204});
     return failure();
   });
-  const auth = createAuth({supabaseUrl:'https://fixture.supabase.co',supabaseAnonKey:'fixture-anon-key',nodeEnv:'production',appOrigin:'https://app.fixture.example'});
+  const auth = createAuth({authMode:'supabase',supabaseUrl:'https://fixture.supabase.co',supabaseAnonKey:'fixture-anon-key',nodeEnv:'production',appOrigin:'https://app.fixture.example'});
   const post = (path,cookie) => request(path,{url:'https://app.fixture.example',method:'POST',origin:'https://app.fixture.example',cookie});
   const callback = cookie => request('/api/auth/callback?code=fixture-code&next=%2Ftables',{url:'https://app.fixture.example',cookie});
   return {auth,calls,user,post,callback};
 }
 
 test('no configured Supabase means unconfigured, never a fake default owner',async () => {
-  const auth = createAuth({authMode:'supabase',supabaseUrl:'',supabaseAnonKey:'',nodeEnv:'test'});
+  const auth = createAuth({authMode:'supabase',supabaseUrl:'',supabaseAnonKey:'',nodeEnv:'test',appOrigin:base});
   assert.deepEqual(await auth.session(request()),{user:null,mode:'unconfigured'});
   await assert.rejects(signIn(auth),safeError('provider_not_ready'));
 });

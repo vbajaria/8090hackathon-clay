@@ -115,6 +115,7 @@ export class RunService {
             storedValue: s.result,
             stale:
               (s.stale ?? true) ||
+              (!!s.result && !s.input_fingerprint) ||
               (!!s.input_fingerprint &&
                 s.input_fingerprint !== currentSignature),
             explanation:

@@ -378,3 +378,10 @@ test('historical reused results stay stale after later automatic formula recompu
   const p=await preview(f,output.id);const run=await f.ok('/runs/confirm',{method:'POST',cookie:f.a.cookie,body:runRequest(p)});
   await patch(f,row.id,source.id,text('After'));const detail=await f.ok(`/runs/${run.id}`,{cookie:f.a.cookie});assert.equal(detail.results[0].storedValue.value,'BEFORE');assert.equal(detail.results[0].stale,true);
 });
+
+test('legacy stored results without fingerprints are conservatively stale, not certified fresh', async t => {
+  const f=await fixture(t);await addRow(f);const output=await column(f,'Legacy result',{kind:'formula',expression:'"legacy"',referencedColumnIds:[],returnType:'text'});
+  const p=await preview(f,output.id);const run=await f.ok('/runs/confirm',{method:'POST',cookie:f.a.cookie,body:runRequest(p)});
+  await db.pool.query('UPDATE app.steps SET input_fingerprint=NULL WHERE run_id=$1',[run.id]);
+  const detail=await f.ok(`/runs/${run.id}`,{cookie:f.a.cookie});assert.equal(detail.results[0].storedValue.value,'legacy');assert.equal(detail.results[0].stale,true);
+});
