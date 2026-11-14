@@ -20,13 +20,13 @@ csvHeaderIssues(headers: string[]): {
 }[]
 ```
 
-`Column` and `CellValue` come from `@leadwork/contracts`. Public failures are `DomainError` with stable `code`, static safe `message`, and lead-free `errors` containing optional UUID column IDs and zero-based row/source indexes. These are domain codes, **not** HTTP contract error codes: callers must map them to `apiError` / import issues without exposing source values or raw caught errors. `malformed_csv` quote diagnostics count the header record; record-width diagnostics index data rows. CSV header issues are correction issues, not parser exceptions. Headers are preserved, never silently renamed or discarded. Name uniqueness uses trimmed, case-insensitive names.
+`Column` and `CellValue` come from `@leadwork/contracts`. Public failures are `DomainError` with stable `code`, static safe `message`, and lead-free `errors` containing optional UUID column IDs and zero-based row/source indexes. These are domain codes, **not** HTTP contract error codes: callers must map them to `apiError` / import issues without exposing source values or raw caught errors. `malformed_csv` diagnostics index data rows; header syntax errors omit the row index. CSV header issues are correction issues, not parser exceptions. Headers are preserved, never silently renamed or discarded. The current `ImportPlanSchema` rejects blank/duplicate headers even in correction state; retain raw parse data separately until the caller has supplied corrected names. Name uniqueness uses trimmed, case-insensitive names.
 
 ## CSV and editable values
 
 The parser counts UTF-8 bytes (including a BOM) against the 10,000,000-byte limit, then strips one leading BOM. It accepts quoted commas/quotes/newlines, CRLF/LF/CR records, and a final record without a terminator. It preserves duplicates, empty cells, whitespace and all quoted content. Unterminated/misplaced quotes, characters after closing quotes and ragged records reject safely. Empty input returns empty headers/rows; an ending record separator does not manufacture a row.
 
-The exporter uses CRLF and RFC quote escaping. Text **and headers** with spreadsheet-executable prefixes are apostrophe-neutralized, including leading whitespace/control prefixes; actual tagged numbers (including negative values) are never neutralized. Only saved typed values are accepted; no computed work is launched. Header-only scopes are supported.
+The exporter uses CRLF and RFC quote escaping. Text **and headers** with spreadsheet-executable prefixes are apostrophe-neutralized, including leading whitespace/control/Unicode-format prefixes; actual tagged numbers (including negative values) are never neutralized. Only saved typed values are accepted; no computed work is launched. Header-only scopes are supported.
 
 Only `''` is an empty editable value and becomes typed null; whitespace text remains text, whitespace numbers/dates/booleans fail. Numeric strings retain exact spelling/sign/scale. Dates must be valid `YYYY-MM-DD` calendars, years 0001–9999. Booleans must be lowercase `true` or `false`.
 

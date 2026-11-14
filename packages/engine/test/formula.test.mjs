@@ -57,3 +57,11 @@ test('AI templates reject empty, over-limit, malformed and name-based references
   for (const template of ['', '  ', 'a'.repeat(2001), '{{name}}', '{{', '}}', '{{'+id(1)+'}} }}']) assert.throws(() => resolveInstructions(template,{}), error => error instanceof DomainError);
   assert.equal(resolveInstructions('😀'.repeat(2000),{}).missingColumnIds.length, 0);
 });
+test('formula references cannot read inherited values and UUID-looking quoted literals are plain text', () => {
+  assert.throws(() => evaluate(ref(1),Object.create({[id(1)]:number('2')})),code('missing_value'));
+  assert.deepEqual(evaluate('"'+ref(1)+'"',{}),text(ref(1)));
+  assert.deepEqual(resolveInstructions(ref(1),Object.create({[id(1)]:text('secret')})),{resolvedInstructions:'',missingColumnIds:[id(1)]});
+});
+test('AST node count is bounded even for broad shallow trees', () => {
+  assert.throws(() => evaluate('CONCAT('+Array(600).fill('"x"').join(',')+')',{}),code('formula_limit'));
+});

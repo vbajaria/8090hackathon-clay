@@ -49,3 +49,20 @@ test('CSV export RFC escaping and spreadsheet neutralization distinguish typed n
   assert.equal(exportCsv(['Name'], []), 'Name\r\n');
   assert.throws(() => exportCsv(['Name'], [[]]), code('invalid_value'));
 });
+test('syntax diagnostics are data-row indexed and omit header row indexes', () => {
+  assert.throws(() => parseCsv('"broken'), error => error.errors[0].sourceIndex === 0 && error.errors[0].rowIndex === undefined);
+  assert.throws(() => parseCsv('A,B\n1,2\n3,"broken'), error => error.errors[0].rowIndex === 1 && error.errors[0].sourceIndex === 1);
+});
+test('text formula injection neutralizes control and invisible format prefixes', () => {
+  const values = ['\u200b=1+1','\uFEFF@cmd',' \u0000\u0085+cmd','\n=1','\tcmd'];
+  const parsed = parseCsv(exportCsv(['value'],values.map(value=>[{type:'text',value}])));
+  assert.deepEqual(parsed.rows.map(row=>row[0]),values.map(value=>"'"+value));
+});
+test('CSV round trips representative quoted fields and final delimiters without normalization', () => {
+  const values = ['', 'plain', ' a ', 'é😀', '"', '\n', '\r', '\r\n', ',,', 'a"b,\nc', '100.20', "'literal"];
+  const csv = exportCsv(['first','second'], values.map(value=>[{type:'text',value},{type:'text',value:'tail'}]));
+  const parsed = parseCsv(csv);
+  // Newline-leading text is deliberately apostrophe-neutralized; all other source fields round-trip.
+  assert.deepEqual(parsed.rows, values.map(value=>[ /^[\r\n]/.test(value) ? "'"+value : value,'tail']));
+  assert.deepEqual(parseCsv('A,B\nvalue,'),{headers:['A','B'],rows:[['value','']]});
+});

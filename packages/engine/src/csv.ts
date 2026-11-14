@@ -19,7 +19,7 @@ export function parseCsv(text: string): CsvData {
   const records: string[][] = [];
   let row: string[] = [], field = '', state: 'start' | 'plain' | 'quoted' | 'closed' = 'start';
   let endedRecord = false;
-  const fail = (): never => { throw new DomainError('malformed_csv', [{ code: 'malformed_csv', rowIndex: records.length, sourceIndex: row.length }]); };
+  const fail = (): never => { throw new DomainError('malformed_csv', [{ code: 'malformed_csv', ...(records.length > 0 ? { rowIndex: records.length - 1 } : {}), sourceIndex: row.length }]); };
   const endField = () => { row.push(field); field = ''; state = 'start'; };
   const endRecord = () => { endField(); records.push(row); row = []; endedRecord = true; };
   for (let i = 0; i < text.length; i++) {
@@ -50,7 +50,7 @@ export function parseCsv(text: string): CsvData {
 }
 function neutralize(text: string): string {
   // Spreadsheet engines may ignore leading Unicode whitespace and ASCII controls.
-  return /^[\s\u0000-\u001f\u007f-\u009f]*[=+\-@]/u.test(text) || /^[\t\r\n]/u.test(text) ? `'${text}` : text;
+  return /^[\s\p{Cc}\p{Cf}]*[=+\-@]/u.test(text) || /^[\t\r\n]/u.test(text) ? `'${text}` : text;
 }
 function quote(text: string): string {
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
