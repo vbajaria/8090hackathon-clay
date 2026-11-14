@@ -3,10 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.0",
-  "engines": { "node": ">=22 <23" },
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
-    "build": "pnpm --filter @leadwork/contracts build",
-    "typecheck": "pnpm --filter @leadwork/contracts typecheck",
-    "test": "pnpm build && node --test packages/contracts/test/*.test.mjs"
+    "build:packages": "pnpm --filter @leadwork/contracts build && pnpm --filter @leadwork/engine build && pnpm --filter @leadwork/providers build && pnpm --filter @leadwork/core build",
+    "build": "pnpm build:packages && pnpm --filter @leadwork/web build && pnpm --filter @leadwork/worker build",
+    "typecheck": "pnpm -r typecheck",
+    "test:unit": "node --test packages/contracts/test/*.test.mjs && pnpm --filter @leadwork/engine test && pnpm --filter @leadwork/providers test && pnpm --filter @leadwork/web test",
+    "test": "pnpm build:packages && pnpm test:unit && pnpm --filter @leadwork/core test",
+    "db:migrate": "pnpm --filter @leadwork/core migrate",
+    "dev": "pnpm --filter @leadwork/web dev",
+    "worker": "pnpm --filter @leadwork/worker start"
   }
 }
